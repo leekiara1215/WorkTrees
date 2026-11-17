@@ -22,7 +22,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<AppError | null>(null);
   const [actionError, setActionError] = useState<AppError | null>(null);
-  const [deleteWarnings, setDeleteWarnings] = useState<{ path: string; messages: string[] } | null>(null);
+  const [deleteWarnings, setDeleteWarnings] = useState<{ path: string; messages: string[]; submodules: DeleteOutcome['submodules'] } | null>(null);
   const [repoId, setRepoId] = useState('');
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
@@ -66,7 +66,7 @@ export default function App() {
     } catch (error) { setActionError(appError(error)); }
     finally { importBusy.current = false; setImporting(false); }
   }
-  async function actOnPath(worktree: Worktree, action: 'copy' | 'reveal') {
+  async function actOnPath(worktree: Pick<Worktree, 'id' | 'path'>, action: 'copy' | 'reveal') {
     if (pathBusy.current) return;
     pathBusy.current = true; setPathAction(`${worktree.id}:${action}`); setActionError(null);
     try {
@@ -81,7 +81,7 @@ export default function App() {
 
   function deleted(outcome: DeleteOutcome) {
     setDialog(null); setActionError(null);
-    setDeleteWarnings(outcome.warnings.length ? { path: outcome.path, messages: outcome.warnings } : null);
+    setDeleteWarnings(outcome.warnings.length || outcome.submodules.length ? { path: outcome.path, messages: outcome.warnings, submodules: outcome.submodules } : null);
     setToast(outcome.warnings.length ? '目录已删除，请查看后续处理提示' : outcome.branchDeleted ? '工作目录与本地分支已删除' : '工作目录已删除');
     void refresh();
   }
@@ -116,7 +116,7 @@ export default function App() {
         <header className="page-heading"><div><div className="breadcrumb"><span>工作空间</span><Icon name="chevron" size={12} /><span>{selectedRepo?.name ?? '全部仓库'}</span></div><div className="title-row"><h1>Worktrees</h1><span className="total-pill">{worktrees.length}</span></div><p className="page-subtitle">每个分支，一个专注的工作目录。</p></div><div className="heading-actions"><button type="button" className="button secondary refresh-button" onClick={() => void refresh()} disabled={loading || importing} title="重新读取仓库状态"><Icon name="refresh" size={16} className={loading ? 'rotating' : ''} /><span>{loading ? '刷新中' : '刷新'}</span></button><button type="button" className="button primary" onClick={() => setDialog({ kind: 'create' })} disabled={!repositories.length || loading || importing}><Icon name="plus" size={17} />创建 Worktree</button></div></header>
         <div className="content-scroll">
           {actionError && <div className="dismissible-error"><ErrorNotice error={actionError} /><button type="button" className="icon-button" onClick={() => setActionError(null)} aria-label="收起操作错误"><Icon name="close" size={16} /></button></div>}
-          {deleteWarnings && <div className="delete-outcome-notice" role="alert"><Icon name="alert" size={18} /><div><strong>工作目录已删除，仍有事项需要处理</strong><p className="path-value">{deleteWarnings.path}</p><ul>{deleteWarnings.messages.map((message, index) => <li key={index}>{message}</li>)}</ul></div><button type="button" className="icon-button" onClick={() => setDeleteWarnings(null)} aria-label="收起删除结果提示"><Icon name="close" size={16} /></button></div>}
+          {deleteWarnings && <div className="delete-outcome-notice" role="status"><Icon name="alert" size={18} /><div><strong>{deleteWarnings.messages.length ? '工作目录已删除，仍有事项需要处理' : '工作目录已删除，子模块处理结果如下'}</strong><p className="path-value">{deleteWarnings.path}</p>{deleteWarnings.messages.length > 0 && <ul>{deleteWarnings.messages.map((message, index) => <li key={index}>{message}</li>)}</ul>}{deleteWarnings.submodules.length > 0 && <ul>{deleteWarnings.submodules.map(module => <li key={module.path}><span>{module.path}：{module.discarded ? '已选择不保留当前分支或游离提交' : module.backupPath ? '分支及提交已保留' : '未初始化，无本地 Git 数据'}{module.backupPath && module.discarded ? '；其他引用已备份' : ''}</span>{module.backupPath && <><p className="path-value">{module.backupPath}</p><div className="button-row"><button type="button" className="text-button" onClick={() => void actOnPath({ id: module.path, path: module.backupPath! }, 'reveal')} disabled={!!pathAction}>查看备份</button><button type="button" className="text-button" onClick={() => void actOnPath({ id: module.path, path: module.backupPath! }, 'copy')} disabled={!!pathAction}>复制备份路径</button></div></>}</li>)}</ul>}</div><button type="button" className="icon-button" onClick={() => setDeleteWarnings(null)} aria-label="收起删除结果提示"><Icon name="close" size={16} /></button></div>}
           <ErrorNotice error={loadError} onRetry={() => void refresh()} />
           {snapshot && snapshot.errors.length > 0 && <div className="snapshot-errors"><details><summary><Icon name="alert" size={16} /><span>{snapshot.errors.length} 项仓库读取异常</span><span className="muted">展开查看</span></summary><div>{snapshot.errors.map((error, index) => <ErrorNotice key={`${error.code}:${index}`} error={error} />)}</div></details></div>}
           <div className="list-toolbar"><div className="search-field"><Icon name="search" size={17} /><input ref={searchInput} value={search} onChange={event => setSearch(event.target.value)} aria-label="搜索分支、目录或仓库" placeholder="搜索分支、目录或仓库…" />{search ? <button type="button" className="icon-button" onClick={() => setSearch('')} aria-label="清空搜索"><Icon name="close" size={14} /></button> : <kbd>⌘ K</kbd>}</div><label className="repository-filter"><Icon name="folder" size={16} /><select aria-label="筛选仓库" value={repoId} onChange={event => setRepoId(event.target.value)}><option value="">全部仓库</option>{repositories.map(repo => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select></label></div>

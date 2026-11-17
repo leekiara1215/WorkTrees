@@ -6,6 +6,7 @@ import type { AppError, Branch, CreateInput, CreatePreview, DeleteInput, DeleteO
 import { git, listGitWorktrees, ServiceError, type GitWorktree } from './git/client.js';
 import { createStore, type ManagedWorktree, type StoreData } from './storage/store.js';
 import { inspectDeleteDirectory, isInside } from './delete-safety.js';
+import { completeSubmoduleRemoval, hasSubmoduleFiles, inspectSubmodules, preserveSubmodules, trackedFileChanges } from './submodule-delete.js';
 
 function fail(code: string, message: string, details?: string): never { throw new ServiceError(code, message, details); }
 function text(value: unknown, label: string, max = 1024): string {
@@ -232,20 +233,24 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     if (entries.some(other => other !== entry && isInside(path, other.path)) || data.repositories.some(other => isInside(path, other.path)) || isInside(path, await physicalPath(resolve(dataDir)))) fail('WORKTREE_UNSAFE', '此目录内包含其他仓库、Worktree 或应用数据，请先单独处理。', path);
     if (deleteBranch && !entry.branch) fail('INVALID_INPUT', '游离 HEAD 没有可删除的本地分支。');
     if (!entry.head || !/^[0-9a-f]{40,64}$/.test(entry.head)) fail('WORKTREE_UNSAFE', '无法确定 Worktree 的提交状态，已停止删除。');
-    const directory = await inspectDeleteDirectory(repo.path, path);
-    let status = ''; let trackedChanges = 0; let untrackedFiles = 0; let ignoredFiles = 0;
+    const identity = await inspectDeleteDirectory(repo.path, path, new Set(), false);
+    const record = data.managedWorktrees.find(w => w.id === worktreeId);
+    const baseBranch = record?.baseBranch ?? repo.defaultBranch;
+    let baseHead: string | null = null;
+    if (baseBranch) {
+      const available = await branches(repo);
+      const base = available.find(b => !b.remote && b.name === baseBranch) ?? available.find(b => b.remote && b.name === baseBranch);
+      if (base) baseHead = (await git(repo.path, ['rev-parse', '--verify', `${base.remote ? 'refs/remotes/' : 'refs/heads/'}${base.name}^{commit}`])).trim();
+    }
+    const modules = await inspectSubmodules(path, baseHead, identity.exists ? undefined : identity.gitDir);
+    const directory = identity.exists ? await inspectDeleteDirectory(repo.path, path, new Set(modules.filter(m => m.preview.state === 'ready').map(m => resolve(path, m.preview.path)))) : identity;
+    let status = ''; let index = ''; let trackedChanges = 0; let untrackedFiles = 0; let ignoredFiles = 0;
     if (directory.exists) {
       const trackedFlags = (await git(path, ['ls-files', '-v', '-z'])).split('\0').filter(Boolean);
       if (trackedFlags.some(line => line[0] === 'S' || /^[a-z]/.test(line))) fail('WORKTREE_UNSAFE', '此 Worktree 存在隐藏文件状态的索引标记，请先处理 sparse/skip-worktree/assume-unchanged 后再删除。');
-      if ((await git(path, ['ls-files', '--stage', '-z'])).split('\0').some(line => line.startsWith('160000 '))) fail('WORKTREE_UNSAFE', '此 Worktree 包含子模块，请先单独处理后再删除。');
-      status = await git(path, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching']);
-      const parts = status.split('\0').filter(Boolean);
-      for (let i = 0; i < parts.length; i++) {
-        const state = parts[i]!.slice(0, 2);
-        if (state === '??' || state === '!!') continue;
-        trackedChanges++;
-        if (/[RC]/.test(state)) i++; // -z emits the rename/copy source as a separate field.
-      }
+      index = await git(path, ['ls-files', '--stage', '-z']);
+      status = await git(path, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching', '--ignore-submodules=none']);
+      trackedChanges = trackedFileChanges(status, index);
       untrackedFiles = (await git(path, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean).length;
       ignoredFiles = (await git(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])).split('\0').filter(Boolean).length;
       const currentHead = (await git(path, ['rev-parse', '--verify', 'HEAD'])).trim();
@@ -259,15 +264,17 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     const requiresConfirmation = trackedChanges + untrackedFiles + ignoredFiles > 0 || uniqueCommits > 0 && (deleteBranch || !entry.branch);
     const warnings: string[] = [];
     if (!directory.exists) warnings.push('目录已经缺失，将仅清理这条 Git Worktree 注册和应用记录。');
+    if (modules.length) warnings.push('默认将子模块分支、提交及其他引用保存到应用数据目录中的独立 Git 备份；未提交文件不会随分支保留。');
+    if (modules.length && !baseHead) warnings.push('基准分支不可用，子模块比较结果为无法确认，将默认保留其提交。');
     if (trackedChanges) warnings.push(`${trackedChanges} 项已跟踪文件修改尚未提交，删除后无法恢复。`);
     if (untrackedFiles) warnings.push(`${untrackedFiles} 个未跟踪文件将一并删除，无法通过 Git 恢复。`);
     if (ignoredFiles) warnings.push(`${ignoredFiles} 个被 Git 忽略的文件也会随目录删除。`);
     if (uniqueCommits > 0) warnings.push(deleteBranch || !entry.branch ? `${uniqueCommits} 个提交未被其他分支或标签保留；删除后可能无法找回。` : `${uniqueCommits} 个独有提交仍由分支 ${entry.branch} 保留。`);
     warnings.push(deleteBranch ? `同时删除本地分支 ${entry.branch}，不会修改远程仓库。` : entry.branch ? `保留本地分支 ${entry.branch} 及其提交。` : '此目录处于游离 HEAD 状态。');
-    const payload = { worktreeId, path, branch: entry.branch, head: entry.head, deleteBranch, trackedChanges, untrackedFiles, ignoredFiles, uniqueCommits, requiresConfirmation, warnings };
-    const token = createHash('sha256').update(deleteTokenSalt).update(JSON.stringify({ payload, directory, refs, entries, status })).digest('hex');
+    const payload = { worktreeId, path, branch: entry.branch, head: entry.head, deleteBranch, trackedChanges, untrackedFiles, ignoredFiles, uniqueCommits, requiresConfirmation, warnings, baseBranch, baseHead, submodules: modules.map(m => m.preview) };
+    const token = createHash('sha256').update(deleteTokenSalt).update(JSON.stringify({ payload, directory, refs, entries, status, index, modules: modules.map(m => m.signature) })).digest('hex');
     const preview: DeletePreview = { ...payload, token };
-    return { preview, repo };
+    return { preview, repo, modules };
   }
   return {
     getSnapshot: () => serial(snapshot),
@@ -354,14 +361,26 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     deleteWorktree: (input: DeleteInput) => serial(async (): Promise<DeleteOutcome> => {
       plain(input);
       if (typeof input.confirmRisks !== 'boolean' || typeof input.token !== 'string' || !/^[0-9a-f]{64}$/.test(input.token)) fail('INVALID_INPUT', '请先检查删除预览并确认风险。');
-      const { preview: plan, repo } = await deletion(input.worktreeId, input.deleteBranch);
+      const { preview: plan, repo, modules } = await deletion(input.worktreeId, input.deleteBranch);
       if (input.token !== plan.token) fail('DELETE_PREVIEW_STALE', '目录、文件或 Git 状态已变化，请重新检查删除预览。');
       if (plan.requiresConfirmation && !input.confirmRisks) fail('DELETE_CONFIRMATION_REQUIRED', '请明确确认未提交文件或提交丢失风险后再删除。');
+      function selection(value: unknown, allowed: string[], label: string): Set<string> {
+        if (value === undefined) return new Set();
+        if (!Array.isArray(value) || value.some(v => typeof v !== 'string' || !allowed.includes(v)) || new Set(value).size !== value.length) fail('INVALID_INPUT', `${label}包含无效或重复的子模块。`);
+        return new Set(value as string[]);
+      }
+      const discard = selection(input.discardSubmodules, plan.submodules.filter(m => m.canDiscard).map(m => m.path), '放弃保留选择');
+      const confirmFiles = selection(input.confirmSubmoduleFiles, plan.submodules.filter(hasSubmoduleFiles).map(m => m.path), '文件丢弃确认');
+      if (plan.submodules.some(m => hasSubmoduleFiles(m) && !confirmFiles.has(m.path))) fail('SUBMODULE_CONFIRMATION_REQUIRED', '请逐个确认子模块中未提交、未跟踪及忽略文件的丢弃风险。');
+      const submodules = await preserveSubmodules(modules, discard, resolve(dataDir));
+      // Saving an independent copy can take time; never delete from an older preview.
+      if (modules.length && (await deletion(input.worktreeId, input.deleteBranch)).preview.token !== plan.token) fail('DELETE_PREVIEW_STALE', '子模块备份期间状态发生变化，已保留备份，请重新检查。', submodules.filter(m => m.backupPath).map(m => `${m.path}: ${m.backupPath}`).join('\n'));
       const args = ['worktree', 'remove'];
-      if (plan.trackedChanges + plan.untrackedFiles > 0) args.push('--force');
+      if (plan.trackedChanges + plan.untrackedFiles > 0 || modules.length) args.push('--force');
       args.push('--', plan.path);
       await git(repo.path, args);
       const warnings: string[] = [];
+      await completeSubmoduleRemoval(modules, submodules, warnings);
       const next = { ...data, managedWorktrees: data.managedWorktrees.filter(w => !(w.repoId === repo.id && samePath(w.path, plan.path))) };
       try { await save(next); }
       catch (error) {
@@ -381,7 +400,7 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
           branchDeleted = true;
         } catch (error) { warnings.push(`目录已删除，但本地分支 ${plan.branch} 未删除，请检查后重试。${appError(error).message}`); }
       }
-      return { worktreeId: input.worktreeId, path: plan.path, branch: plan.branch, branchDeleted, warnings };
+      return { worktreeId: input.worktreeId, path: plan.path, branch: plan.branch, branchDeleted, warnings, submodules };
     }),
   };
 }

@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import type { AppError, Branch, CreatePreview, DeleteOutcome, DeletePreview, RecoveryPreview, Repository, Settings, Worktree } from '../shared/types';
+import type { AppError, Branch, CreatePreview, DeleteOutcome, DeletePreview, RecoveryPreview, Repository, Settings, SubmoduleDeletePreview, Worktree } from '../shared/types';
 import { appError, ErrorNotice, Icon, Modal, request, Spinner } from './ui';
 
 export function CreateDialog({ repositories, settings, initialRepoId, onClose, onCreated }: { repositories: Repository[]; settings: Settings; initialRepoId: string; onClose: () => void; onCreated: (worktree: Worktree) => void }) {
@@ -171,6 +171,8 @@ export function DeleteDialog({ worktree, onClose, onDeleted }: { worktree: Workt
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
+  const [discardSubmodules, setDiscardSubmodules] = useState<string[]>([]);
+  const [confirmSubmoduleFiles, setConfirmSubmoduleFiles] = useState<string[]>([]);
   const [previewError, setPreviewError] = useState<AppError | null>(null);
   const [operationError, setOperationError] = useState<AppError | null>(null);
   const [reload, setReload] = useState(0);
@@ -178,11 +180,16 @@ export function DeleteDialog({ worktree, onClose, onDeleted }: { worktree: Workt
   const key = JSON.stringify([worktree.id, deleteBranch, reload]);
   const currentPreview = preview?.key === key ? preview.data : null;
   const displayedBranch = currentPreview ? currentPreview.branch : worktree.branch;
-  const canDelete = !worktree.isMain && !worktree.locked && !loading && !!currentPreview && (!currentPreview.requiresConfirmation || confirmed);
+  const hasFiles = (module: SubmoduleDeletePreview) => module.trackedChanges + module.untrackedFiles + module.ignoredFiles > 0;
+  const canDelete = !worktree.isMain && !worktree.locked && !loading && !!currentPreview && (!currentPreview.requiresConfirmation || confirmed) && currentPreview.submodules.every(m => !hasFiles(m) || confirmSubmoduleFiles.includes(m.path));
+  function toggleSelection(set: (update: (previous: string[]) => string[]) => void, path: string, checked: boolean) {
+    set(previous => checked ? [...previous.filter(item => item !== path), path] : previous.filter(item => item !== path));
+  }
 
   useEffect(() => {
     let active = true;
     setLoading(true); setPreview(null); setPreviewError(null); setConfirmed(false);
+    setDiscardSubmodules([]); setConfirmSubmoduleFiles([]);
     request(() => window.worktrees.previewDelete(worktree.id, deleteBranch)).then(data => {
       if (active) setPreview({ key, data });
     }).catch(error => { if (active) setPreviewError(appError(error)); }).finally(() => { if (active) setLoading(false); });
@@ -197,7 +204,7 @@ export function DeleteDialog({ worktree, onClose, onDeleted }: { worktree: Workt
     if (busyRef.current || !canDelete || !currentPreview) return;
     busyRef.current = true; setSaving(true); setOperationError(null);
     try {
-      const result = await request(() => window.worktrees.deleteWorktree({ worktreeId: worktree.id, deleteBranch: currentPreview.deleteBranch, token: currentPreview.token, confirmRisks: confirmed }));
+      const result = await request(() => window.worktrees.deleteWorktree({ worktreeId: worktree.id, deleteBranch: currentPreview.deleteBranch, token: currentPreview.token, confirmRisks: confirmed, discardSubmodules, confirmSubmoduleFiles }));
       onDeleted(result);
     } catch (error) {
       setOperationError(appError(error)); setConfirmed(false); setPreview(null); setReload(value => value + 1);
@@ -210,6 +217,22 @@ export function DeleteDialog({ worktree, onClose, onDeleted }: { worktree: Workt
       {loading && <div className="dialog-loading"><Spinner label="正在检查修改与提交" /></div>}
       {currentPreview && <>
         <div className="delete-checks" aria-live="polite"><div><span>已跟踪文件修改</span><strong>{currentPreview.trackedChanges}</strong></div><div><span>未跟踪文件</span><strong>{currentPreview.untrackedFiles}</strong></div><div><span>被忽略的文件</span><strong>{currentPreview.ignoredFiles}</strong></div><div><span>其他引用未包含的提交</span><strong>{currentPreview.uniqueCommits}</strong></div></div>
+        {currentPreview.submodules.length > 0 && <section className="submodule-checks" aria-label="子模块删除检查">
+          <div className="submodule-heading"><h3>子模块检查 · {currentPreview.submodules.length}</h3><p>比较基准：{currentPreview.baseBranch ?? '无可用基准'}{currentPreview.baseHead ? ` · ${currentPreview.baseHead.slice(0, 12)}` : ''}</p><p>默认保留分支及提交；保留成功后再删除目录。未提交文件需单独确认丢弃。</p></div>
+          {currentPreview.submodules.map(module => <div className="submodule-check" key={module.path}>
+            <strong className="submodule-path">{module.path}</strong>
+            <dl className="preview-values">
+              <div><dt>分支</dt><dd>{module.branch ?? (module.head ? '游离 HEAD' : '未初始化')}</dd></div>
+              <div><dt>当前提交</dt><dd>{module.head?.slice(0, 12) ?? '无本地检出'}{module.state === 'missing-worktree' ? ' · 工作目录缺失，仍有本地 Git 数据' : ''}</dd></div>
+              <div><dt>基准提交</dt><dd>{module.baseHead?.slice(0, 12) ?? '基准中无此模块或无法读取'}</dd></div>
+              <div><dt>检查结果</dt><dd>{module.state === 'uninitialized' ? '未初始化，无本地分支或文件需要保留' : module.comparison === 'same' ? '与基准一致，无需确认放弃分支' : module.comparison === 'different' ? `与基准不同 · 领先 ${module.ahead} / 落后 ${module.behind} 个提交` : '无法确认与基准的提交关系，默认保留'}</dd></div>
+            </dl>
+            {module.protectionReason && <p className="inline-hint">{module.protectionReason}</p>}
+            {module.canDiscard && <label className="delete-option risk-confirmation"><input type="checkbox" checked={discardSubmodules.includes(module.path)} onChange={event => toggleSelection(setDiscardSubmodules, module.path, event.target.checked)} disabled={saving} /><span><strong>{module.branch ? `不保留此子模块分支 ${module.branch}` : '不保留此子模块的游离提交'}</strong><small>允许丢失此分支或游离 HEAD 的独有提交；其他分支和标签等引用仍会保留。不勾选时先保留，再删除目录。</small></span></label>}
+            {hasFiles(module) && <label className="delete-option risk-confirmation"><input type="checkbox" checked={confirmSubmoduleFiles.includes(module.path)} onChange={event => toggleSelection(setConfirmSubmoduleFiles, module.path, event.target.checked)} disabled={saving} /><span><strong>确认丢弃此子模块的本地文件修改</strong><small>已跟踪修改 {module.trackedChanges} 项、未跟踪文件 {module.untrackedFiles} 个、忽略文件 {module.ignoredFiles} 个。保留分支无法保存这些文件。</small></span></label>}
+          </div>)}
+          <p className="submodule-summary">{currentPreview.submodules.filter(m => m.head).length - discardSubmodules.length} 个子模块保留当前分支或提交；{discardSubmodules.length} 个明确放弃保留。所有子模块工作目录将随 Worktree 删除。</p>
+        </section>}
         {currentPreview.warnings.length > 0 && <ul className="warning-list">{currentPreview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
         <div className="safety-note delete-safety-note"><Icon name="alert" size={18} /><p>删除会移除上述目录及其中的文件。{currentPreview.deleteBranch ? '所选本地分支也会删除。' : currentPreview.branch ? '本地分支将保留。' : '游离 HEAD 没有对应的本地分支。'}此操作无法在应用内撤销。</p></div>
         {currentPreview.requiresConfirmation && <label className="delete-option risk-confirmation"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} disabled={saving} /><span><strong>我已确认以上风险，并同意删除</strong><small>未提交、未跟踪及被忽略的文件可能永久丢失；删除分支或游离 HEAD 可能丢失独有提交。</small></span></label>}

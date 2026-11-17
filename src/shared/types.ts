@@ -17,9 +17,20 @@ export interface DeletePreview {
   worktreeId: string; path: string; branch: string | null; head: string | null;
   deleteBranch: boolean; trackedChanges: number; untrackedFiles: number; ignoredFiles: number;
   uniqueCommits: number; requiresConfirmation: boolean; warnings: string[]; token: string;
+  baseBranch: string | null; baseHead: string | null; submodules: SubmoduleDeletePreview[];
 }
-export interface DeleteInput { worktreeId: string; deleteBranch: boolean; token: string; confirmRisks: boolean }
-export interface DeleteOutcome { worktreeId: string; path: string; branch: string | null; branchDeleted: boolean; warnings: string[] }
+export interface SubmoduleDeletePreview {
+  path: string; branch: string | null; head: string | null; baseHead: string | null;
+  state: 'ready' | 'uninitialized' | 'missing-worktree';
+  comparison: 'same' | 'different' | 'unknown'; ahead: number | null; behind: number | null;
+  trackedChanges: number; untrackedFiles: number; ignoredFiles: number;
+  canDiscard: boolean; protectionReason: string | null;
+}
+export interface SubmoduleDeleteOutcome {
+  path: string; backupPath: string | null; discarded: boolean; branchDeleted: boolean;
+}
+export interface DeleteInput { worktreeId: string; deleteBranch: boolean; token: string; confirmRisks: boolean; discardSubmodules?: string[]; confirmSubmoduleFiles?: string[] }
+export interface DeleteOutcome { worktreeId: string; path: string; branch: string | null; branchDeleted: boolean; warnings: string[]; submodules: SubmoduleDeleteOutcome[] }
 export interface AppApi {
   getSnapshot(): Promise<Result<Snapshot>>;
   chooseDirectory(): Promise<Result<string | null>>;

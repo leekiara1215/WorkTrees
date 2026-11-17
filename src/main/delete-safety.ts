@@ -6,7 +6,7 @@ import { git, ServiceError } from './git/client.js';
 const refuse = (message: string, details?: string): never => { throw new ServiceError('WORKTREE_UNSAFE', message, details); };
 
 /** Verify both ends of Git's worktree link before permitting a destructive operation. */
-export async function inspectDeleteDirectory(repoPath: string, path: string): Promise<{ exists: boolean; signature: string }> {
+export async function inspectDeleteDirectory(repoPath: string, path: string, submodules: ReadonlySet<string> = new Set(), scanContents = true): Promise<{ exists: boolean; signature: string; gitDir: string }> {
   if (!isAbsolute(path) || resolve(path) !== path) refuse('Worktree 路径不是规范的绝对路径。', path);
   let entry;
   try { entry = await lstat(path, { bigint: true }); }
@@ -19,7 +19,17 @@ export async function inspectDeleteDirectory(repoPath: string, path: string): Pr
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       const next = dirname(parent); if (next === parent) throw error; parent = next;
     }
-    return { exists: false, signature: 'missing' };
+    const common = await realpath((await git(repoPath, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim());
+    const adminRoot = join(common, 'worktrees');
+    for (const name of await readdir(adminRoot)) {
+      const admin = join(adminRoot, name);
+      if ((await lstat(admin)).isSymbolicLink()) continue;
+      const backlink = await readFile(join(admin, 'gitdir'), 'utf8').catch(() => '');
+      if (backlink.trim() !== join(path, '.git')) continue;
+      if (await realpath(admin) !== admin || (await lstat(join(admin, 'gitdir'))).isSymbolicLink()) refuse('缺失 Worktree 的管理目录身份不一致。', admin);
+      return { exists: false, signature: 'missing', gitDir: admin };
+    }
+    return refuse('无法找到缺失 Worktree 对应的 Git 管理目录。', path);
   }
   if (!entry.isDirectory() || entry.isSymbolicLink() || await realpath(path) !== path) refuse('Worktree 路径已被替换或包含符号链接，无法安全删除。', path);
   const dotGit = join(path, '.git');
@@ -35,6 +45,7 @@ export async function inspectDeleteDirectory(repoPath: string, path: string): Pr
   if (!link.startsWith('gitdir: ') || await realpath(resolve(path, link.slice(8))) !== gitDir) refuse('Worktree 的 Git 链接无效，已停止删除。', path);
   const backlink = (await readFile(join(gitDir, 'gitdir'), 'utf8')).trim();
   if (!isAbsolute(backlink) || resolve(backlink) !== dotGit || await realpath(backlink) !== dotGit) refuse('Worktree 的 Git 注册路径与目录不一致，已停止删除。', path);
+  if (!scanContents) return { exists: true, signature: 'identity-verified', gitDir };
 
   // A file's ctime changes even when its mtime is restored. This catches updates to
   // already-dirty/untracked/ignored files without loading large file contents.
@@ -51,7 +62,7 @@ export async function inspectDeleteDirectory(repoPath: string, path: string): Pr
       if (current !== path && ['HEAD', 'config', 'objects', 'refs'].every(name => children.includes(name))) refuse('目录内可能包含裸 Git 仓库，请先单独处理后再删除。', current);
       for (const child of children) {
         if (child === '.git') {
-          if (current !== path) refuse('目录内包含嵌套 Git 仓库或子模块，请先单独处理后再删除。', join(current, child));
+          if (current !== path && !submodules.has(current)) refuse('目录内包含未验证的嵌套 Git 仓库，请先单独处理后再删除。', join(current, child));
           continue;
         }
         await scan(join(current, child));
@@ -62,7 +73,7 @@ export async function inspectDeleteDirectory(repoPath: string, path: string): Pr
   // Include the .git link identity, without traversing the shared repository.
   const dotInfo = await lstat(dotGit, { bigint: true });
   hash.update(`${gitDir}\0${link}\0${dotInfo.ino}\0${dotInfo.ctimeNs}`);
-  return { exists: true, signature: hash.digest('hex') };
+  return { exists: true, signature: hash.digest('hex'), gitDir };
 }
 
 export function isInside(parent: string, path: string): boolean {

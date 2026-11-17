@@ -46,9 +46,14 @@ async function createWindow() {
 
 if (instanceLock) app.whenReady().then(async () => {
   const service = createWorktreeService({ dataDir: app.getPath('userData') });
+  const backupPaths = new Set<string>();
   // Service validates every argument, including calls from untyped IPC boundaries.
   const methods = ['getSnapshot', 'addRepository', 'removeRepository', 'updateRepository', 'updateSettings', 'listBranches', 'previewCreate', 'createWorktree', 'previewRecovery', 'recreateWorktree', 'previewDelete', 'deleteWorktree'] as const;
-  for (const method of methods) handle(method, (...args) => Reflect.apply(service[method], service, args));
+  for (const method of methods) handle(method, async (...args) => {
+    const result = await Reflect.apply(service[method], service, args);
+    if (method === 'deleteWorktree') for (const module of result.submodules) if (module.backupPath) backupPaths.add(module.backupPath);
+    return result;
+  });
   handle('chooseDirectory', async () => {
     const result = await dialog.showOpenDialog(mainWindow!, { title: '选择文件夹', properties: ['openDirectory', 'createDirectory'] });
     return result.canceled ? null : result.filePaths[0] ?? null;
@@ -58,7 +63,7 @@ if (instanceLock) app.whenReady().then(async () => {
     const path = requiredString(value, '路径');
     if (!isAbsolute(path)) throw Object.assign(new Error('请选择绝对路径。'), { code: 'INVALID_INPUT' });
     const snapshot = await service.getSnapshot();
-    if (![...snapshot.repositories.map(repo => repo.path), ...snapshot.worktrees.map(tree => tree.path)].includes(path)) throw Object.assign(new Error('此路径不属于已登记的仓库或工作树。'), { code: 'UNKNOWN_PATH' });
+    if (!backupPaths.has(path) && ![...snapshot.repositories.map(repo => repo.path), ...snapshot.worktrees.map(tree => tree.path)].includes(path)) throw Object.assign(new Error('此路径不属于已登记的仓库、工作树或本次生成的子模块备份。'), { code: 'UNKNOWN_PATH' });
     shell.showItemInFolder(path);
   });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
