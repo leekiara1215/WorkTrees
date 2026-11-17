@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-electron/
+release/
+*.log
+.DS_Store
+test-results/
+# Local chat coordination records are not part of the published product.
+docs/COORDINATION.md
+docs/IMPLEMENTATION.md
+docs/handoff/
+scripts/context-status.mjs

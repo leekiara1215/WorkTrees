@@ -1,0 +1,67 @@
+# WorkTrees Lite 集成验证
+
+验证日期：2026-11-17。服务层测试针对无 Electron 依赖的 `createWorktreeService({ dataDir })` 公开接口；主统筹另完成下述桌面验收。
+
+## 运行
+
+```sh
+npm test
+```
+
+命令由项目配置解析为 `tsx --test tests/*.test.ts`。需要本机 Node、Git 及已安装的项目依赖；测试不联网、不安装依赖。
+
+测试自身的独立类型检查：
+
+```sh
+node_modules/.bin/tsc --noEmit --strict --skipLibCheck --target ES2022 --module ESNext --moduleResolution Bundler --allowImportingTsExtensions --types node tests/fixtures.ts tests/worktree-service.test.ts
+```
+
+## 当前结果
+
+- 集成测试：27 通过，0 失败，0 跳过，约 11.5 秒；已按最终模板/原始分支契约回归。
+- 测试及其后端依赖的独立 TypeScript 检查：通过。
+- 运行环境：Node v26.12.0，Git 2.54.0（Apple Git-157），macOS。
+- 两项首轮契约缺陷已由后端线程修复：模板错误替换合法名称中的空格；默认前缀掩盖原始非法分支名 `-bad`。QA 未修改后端实现，相关原始断言均保留。
+- 当前没有已确认但未修复的可复现服务层 bug。
+
+两项已修复问题的定向回归命令（在当前实现应通过）：
+
+```sh
+node_modules/.bin/tsx --test --test-name-pattern='root template|branch input' tests/worktree-service.test.ts
+```
+
+## 覆盖
+
+- 导入：主 checkout、已有关联 worktree、子目录/关联 checkout 重复导入去重、非 Git 与缺失目录拒绝。
+- 配置：全局前缀，仓库继承、清空、自定义、恢复继承；根目录中两个变量的展开；Unicode 仓库名称持久化。
+- 校验：非法 Git 分支、路径穿越、控制字符、参数式分支名、缺失/非法基准分支、已存在或已 checkout 的分支。
+- 创建：真实 Git 分支与 worktree、指定基准分支、原 checkout 保持、预览只读、元数据跨服务重启保留。
+- 防覆盖：模板根路径下的非空目录、空目录、符号链接；规范化后可能碰撞的分支名称不得复用已有 checkout。
+- 刷新：应用外创建/移除 worktree、锁定原因、外部条目不会误标为应用管理。
+- 异常：应用记录对应目录被移除，Git 注册清理后仍可识别；仓库消失保留诊断并拒绝操作。
+- 重建：保留现有分支提交内容；分支也消失时从记录基准分支重建并给出警告；目标目录非空或为空时均拒绝覆盖；基准分支也消失时保留记录，恢复基准分支后可重试；分支被其他 worktree 占用时拒绝且保留对方未提交文件；缺失目录仍被锁定时拒绝，显式解锁后可恢复。
+- 串行化：并发设置与仓库更新无丢失，三个并发创建均可持久化，同分支并发创建只有一次成功。
+- 持久化：真实 JSON 可解析；设置、仓库配置、worktree ID/baseBranch 保留；移除应用仓库记录不改 Git worktree 注册。
+- 闲置：真实外部 checkout 的目录/index 活动时间设为 60 天前，30 天阈值判闲置，90 天阈值判活跃；新创建 checkout 活跃。
+
+## 安全隔离与边界
+
+`tests/fixtures.ts` 在系统临时目录生成真实仓库与独立 dataDir，并在每个测试结束清理。Git 通过 execFile 参数调用，提交使用 QA 身份，禁用 hooks 和全局 Git 配置；不在项目源码仓库执行任何 Git 写操作。
+
+本轮不覆盖 Electron IPC、窗口与 UI 交互、打包产物、Git 缺失/超时、跨进程多实例竞争、掉电中断、Windows/Linux 差异。创建/重建及元数据持久化使用真实文件系统和 Git；未使用 Git mock。
+
+活动时间是目录、`.git` 的 mtime 与最近提交时间的最大值，不保证识别所有未暂存文件的原地编辑。`<REPOSITORY_NAME>` 必须保留合法名称中的空格，生成叶目录的 slug 可另行规范化。原始分支名和加前缀后的完整分支名均须通过 Git 校验；原始 `-bad` 在默认 `wt/` 前缀下仍须拒绝。
+
+## 桌面与打包验收（主统筹）
+
+- `npm run build`：renderer/main TypeScript 检查与 Vite 生产构建通过，无构建警告。
+- `npm run package` 的打包步骤：已生成 `release/WorkTrees Lite-darwin-arm64/WorkTrees Lite.app`；最终运行时为 Electron 45.3.3。
+- `npm audit`：0 个漏洞。运行时下载以官方 npm 包内 SHA-256 校验，通过后使用标准 Electron artifact cache。
+- 实际启动打包后的 `.app`，确认沙箱 preload/受限 IPC 与本地持久化正常。
+- 使用 `WORKTREES_LITE_DATA_DIR` 指向独立临时 profile，通过真实 UI 保存含 `<REPOSITORY_NAME>` 的目录模板、导入临时 Git 仓库、预览并创建 `wt/feature/ui-smoke`。
+- 真实 UI 搜索 `ui-smoke` 后仅显示目标 worktree；移开该测试目录后点击刷新，缺失/异常计数为 1，缺失筛选仅显示目标条目。
+- 真实 UI 打开重建预览，显示已有分支、原目录和未提交修改无法恢复提示；确认后成功重建，缺失计数归零。
+- 随后使用独立 Git/文件检查核实重建目录存在、当前分支为 `wt/feature/ui-smoke`、README 提交内容正确；测试应用已退出。
+- 用户真实项目和默认应用 profile 均未导入或改写，测试文件仅位于系统临时目录。
+
+未实测 Windows/Linux；当前交付为 macOS arm64。外部 worktree 可发现和展示，重建仅针对本应用已保存元数据的记录。

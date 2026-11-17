@@ -1,0 +1,33 @@
+{
+  "name": "worktrees-lite",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A small local Git worktree manager",
+  "type": "module",
+  "main": "dist-electron/main/main.js",
+  "scripts": {
+    "setup:electron": "node node_modules/electron/install.js",
+    "dev": "npm run setup:electron && npm run build:main && node scripts/dev.mjs",
+    "build:main": "tsc -p tsconfig.main.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.main.json --noEmit",
+    "build": "npm run typecheck && npm run build:main && vite build",
+    "start": "npm run setup:electron && node scripts/start.mjs",
+    "test": "tsx --test tests/*.test.ts",
+    "package": "npm run build && node scripts/package.mjs"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "6.3.0",
+    "electron": "45.3.3",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vite": "8.3.8"
+  }
+}

@@ -1,0 +1,31 @@
+export interface AppError { code: string; message: string; details?: string; retryable?: boolean }
+export type Result<T> = { ok: true; data: T } | { ok: false; error: AppError };
+export interface Settings { worktreeRoot: string; branchPrefix: string; staleDays: number }
+export interface Repository { id: string; name: string; path: string; defaultBranch: string | null; branchPrefix: string | null; addedAt: string }
+export interface Branch { name: string; remote: boolean; current: boolean }
+export interface Worktree {
+  id: string; repoId: string; repoName: string; path: string; branch: string | null; head: string | null;
+  baseBranch: string | null; isMain: boolean; exists: boolean; locked: boolean; lockReason: string | null;
+  prunable: boolean; managed: boolean; createdAt: string | null; lastActivityAt: string | null;
+  stale: boolean; error: AppError | null;
+}
+export interface Snapshot { settings: Settings; repositories: Repository[]; worktrees: Worktree[]; errors: AppError[]; refreshedAt: string }
+export interface CreateInput { repoId: string; baseBranch: string; branchName: string }
+export interface CreatePreview { repoId: string; branch: string; baseBranch: string; path: string; warnings: string[] }
+export interface RecoveryPreview { worktreeId: string; path: string; branch: string; baseBranch: string | null; branchExists: boolean; action: 'recreate-existing-branch' | 'recreate-from-base'; warnings: string[] }
+export interface AppApi {
+  getSnapshot(): Promise<Result<Snapshot>>;
+  chooseDirectory(): Promise<Result<string | null>>;
+  addRepository(path: string): Promise<Result<Repository>>;
+  removeRepository(repoId: string): Promise<Result<void>>;
+  updateRepository(repoId: string, patch: { name?: string; branchPrefix?: string | null }): Promise<Result<Repository>>;
+  updateSettings(patch: Partial<Settings>): Promise<Result<Settings>>;
+  listBranches(repoId: string): Promise<Result<Branch[]>>;
+  previewCreate(input: CreateInput): Promise<Result<CreatePreview>>;
+  createWorktree(input: CreateInput): Promise<Result<Worktree>>;
+  previewRecovery(worktreeId: string): Promise<Result<RecoveryPreview>>;
+  recreateWorktree(worktreeId: string): Promise<Result<Worktree>>;
+  revealPath(path: string): Promise<Result<void>>;
+  copyText(text: string): Promise<Result<void>>;
+}
+declare global { interface Window { worktrees: AppApi } }
