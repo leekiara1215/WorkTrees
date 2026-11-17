@@ -16,6 +16,7 @@ export function appError(error: unknown): AppError {
 }
 
 const icons = {
+  trash: <><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></>,
   branch: <><path d="M6 6v11a3 3 0 0 0 3 3h1M6 10h8a4 4 0 0 0 4-4V4"/><circle cx="6" cy="4" r="2"/><circle cx="12" cy="20" r="2"/><circle cx="18" cy="2" r="2"/></>,
   folder: <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z"/>,
   plus: <path d="M12 5v14M5 12h14"/>,

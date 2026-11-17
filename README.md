@@ -1,8 +1,8 @@
 # WorkTrees Lite
 
-一个本地 Git Worktree 桌面管理器，首版仅包含创建、目录/命名配置、列表/搜索/筛选、异常识别与重建。交互参考本机 Kepler，代码独立实现。
+一个本地 Git Worktree 桌面管理器，支持创建、目录/命名配置、列表/搜索/筛选、异常识别、重建与安全删除。交互参考本机 Kepler，代码独立实现。
 
-当前正式版本：**v1.0.0**。发布说明见 [CHANGELOG.md](CHANGELOG.md)。
+当前正式版本：**v1.0.0**；当前源码开发版本：**v1.1.0**。发布说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 下载
 
@@ -47,15 +47,16 @@ v1.0.0 的 macOS Apple Silicon 应用路径：`release/v1.0.0/WorkTrees Lite-dar
 
 默认根目录为 `~/WorktreesLite`，分支前缀为 `wt/`。根目录支持 `<REPOSITORY_NAME>`、`<REPOSITORY_PATH>` 变量。例如 `/path/to/worktrees/<REPOSITORY_NAME>`。名称和目录以创建预览为准。用户数据只保存在应用的本地 userData 目录。
 
-重建不会覆盖现有目录，也无法找回已经丢失的未提交修改。主仓库 checkout 与外部 Worktree 会被标记；本应用不会提供删除按钮。
+重建不会覆盖现有目录，也无法找回已经丢失的未提交修改。主仓库 checkout 与外部 Worktree 会被标记。v1.1.0 为非主 Worktree 提供安全删除入口，默认保留分支，锁定条目需要先自行检查锁定原因。
 
 重建针对本应用创建并保留记录的 Worktree；外部 Worktree 目前只发现和展示。闲置标签根据目录、`.git` 的修改时间与最近提交时间估算，不保证识别所有文件内的原地编辑。
 
 ## 首版范围
 
 - 已包含：导入仓库、Git Worktree 创建、命名与路径设置、持久登记、发现外部 Worktree、分组与筛选、缺失识别、重建预览与执行、可重试错误。
-- 后续版本：代码 diff、同步/Rebase/Merge/Push、自动初始化命令、清理与删除。没有 agent/session 或聊天能力。
-- 当前筛选聚焦全部、闲置、缺失、锁定与异常。同步冲突和安全删除判断随对应后续功能加入。
+- v1.1.0：安全删除 Worktree、可选删除分支，以及偏好设置中的系统目录选择器。
+- 后续版本：代码 diff、同步/Rebase/Merge/Push、自动初始化命令和批量清理。没有 agent/session 或聊天能力。
+- 当前筛选聚焦全部、闲置、缺失、锁定与异常。同步冲突判断随对应后续功能加入。
 
 ## 验证
 

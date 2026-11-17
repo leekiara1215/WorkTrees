@@ -12,6 +12,8 @@ const api: AppApi = {
   createWorktree: (input) => ipcRenderer.invoke('worktrees:createWorktree', input),
   previewRecovery: (id) => ipcRenderer.invoke('worktrees:previewRecovery', id),
   recreateWorktree: (id) => ipcRenderer.invoke('worktrees:recreateWorktree', id),
+  previewDelete: (id, deleteBranch) => ipcRenderer.invoke('worktrees:previewDelete', id, deleteBranch),
+  deleteWorktree: (input) => ipcRenderer.invoke('worktrees:deleteWorktree', input),
   revealPath: (path) => ipcRenderer.invoke('worktrees:revealPath', path),
   copyText: (text) => ipcRenderer.invoke('worktrees:copyText', text),
 };

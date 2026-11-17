@@ -2,9 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
-import type { AppError, Branch, CreateInput, CreatePreview, RecoveryPreview, Repository, Settings, Snapshot, Worktree } from '../shared/types.js';
+import type { AppError, Branch, CreateInput, CreatePreview, DeleteInput, DeleteOutcome, DeletePreview, RecoveryPreview, Repository, Settings, Snapshot, Worktree } from '../shared/types.js';
 import { git, listGitWorktrees, ServiceError, type GitWorktree } from './git/client.js';
 import { createStore, type ManagedWorktree, type StoreData } from './storage/store.js';
+import { inspectDeleteDirectory, isInside } from './delete-safety.js';
 
 function fail(code: string, message: string, details?: string): never { throw new ServiceError(code, message, details); }
 function text(value: unknown, label: string, max = 1024): string {
@@ -52,6 +53,7 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
   let data: StoreData;
   let initialized: Promise<void> | undefined;
   let tail: Promise<unknown> = Promise.resolve();
+  const deleteTokenSalt = randomUUID();
   const ready = () => initialized ??= store.load().then(value => { data = value; });
   function serial<T>(operation: () => Promise<T>): Promise<T> {
     const task = tail.then(async () => { await ready(); return operation(); });
@@ -197,6 +199,76 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     return { worktreeId, path: record.path, branch: record.branch, baseBranch: record.baseBranch, branchExists,
       action: branchExists ? 'recreate-existing-branch' : 'recreate-from-base', warnings: [branchExists ? '使用现有分支重建目录。' : `原分支已不存在，将从 ${record.baseBranch} 重新创建。`, '无法恢复原目录中未提交的修改或未跟踪文件。'] };
   }
+  function externalId(repo: Repository, path: string): string {
+    return `external-${createHash('sha256').update(`${repo.id}\0${path}`).digest('hex').slice(0, 24)}`;
+  }
+  async function deleteTarget(worktreeId: string) {
+    text(worktreeId, 'Worktree ID');
+    const record = data.managedWorktrees.find(w => w.id === worktreeId);
+    if (record) {
+      const repo = repository(record.repoId); await requireRepo(repo);
+      const entries = await listGitWorktrees(repo.path);
+      const entry = entries.find(w => samePath(w.path, record.path));
+      if (!entry) fail('WORKTREE_NOT_REGISTERED', 'Git 中已没有这条 Worktree 注册，请刷新并检查原目录。', record.path);
+      return { repo, entries, entry };
+    }
+    for (const repo of data.repositories) {
+      let entries: GitWorktree[];
+      try { await requireRepo(repo); entries = await listGitWorktrees(repo.path); }
+      catch { continue; }
+      const entry = entries.find(w => externalId(repo, w.path) === worktreeId);
+      if (entry) return { repo, entries, entry };
+    }
+    return fail('WORKTREE_NOT_FOUND', '这条 Worktree 已不存在，请刷新列表。');
+  }
+  async function deletion(worktreeId: string, deleteBranch: boolean) {
+    if (typeof deleteBranch !== 'boolean') fail('INVALID_INPUT', '是否删除分支必须明确选择。');
+    const { repo, entries, entry } = await deleteTarget(worktreeId);
+    const mainPath = await physicalPath(entries[0]?.path ?? repo.path);
+    const path = await physicalPath(entry.path);
+    if (samePath(path, mainPath) || samePath(path, await physicalPath(repo.path)) || entry.bare) fail('MAIN_WORKTREE', '主仓库不能通过 Worktree 删除操作移除。');
+    if (entry.locked) fail('WORKTREE_LOCKED', 'Worktree 已锁定，请先检查锁定原因并在 Git 中手动处理。', entry.lockReason ?? entry.path);
+    if (entry.path !== path) fail('WORKTREE_UNSAFE', 'Worktree 路径包含别名或符号链接，无法安全删除。', entry.path);
+    if (entries.some(other => other !== entry && isInside(path, other.path)) || data.repositories.some(other => isInside(path, other.path)) || isInside(path, await physicalPath(resolve(dataDir)))) fail('WORKTREE_UNSAFE', '此目录内包含其他仓库、Worktree 或应用数据，请先单独处理。', path);
+    if (deleteBranch && !entry.branch) fail('INVALID_INPUT', '游离 HEAD 没有可删除的本地分支。');
+    if (!entry.head || !/^[0-9a-f]{40,64}$/.test(entry.head)) fail('WORKTREE_UNSAFE', '无法确定 Worktree 的提交状态，已停止删除。');
+    const directory = await inspectDeleteDirectory(repo.path, path);
+    let status = ''; let trackedChanges = 0; let untrackedFiles = 0; let ignoredFiles = 0;
+    if (directory.exists) {
+      const trackedFlags = (await git(path, ['ls-files', '-v', '-z'])).split('\0').filter(Boolean);
+      if (trackedFlags.some(line => line[0] === 'S' || /^[a-z]/.test(line))) fail('WORKTREE_UNSAFE', '此 Worktree 存在隐藏文件状态的索引标记，请先处理 sparse/skip-worktree/assume-unchanged 后再删除。');
+      if ((await git(path, ['ls-files', '--stage', '-z'])).split('\0').some(line => line.startsWith('160000 '))) fail('WORKTREE_UNSAFE', '此 Worktree 包含子模块，请先单独处理后再删除。');
+      status = await git(path, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching']);
+      const parts = status.split('\0').filter(Boolean);
+      for (let i = 0; i < parts.length; i++) {
+        const state = parts[i]!.slice(0, 2);
+        if (state === '??' || state === '!!') continue;
+        trackedChanges++;
+        if (/[RC]/.test(state)) i++; // -z emits the rename/copy source as a separate field.
+      }
+      untrackedFiles = (await git(path, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean).length;
+      ignoredFiles = (await git(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])).split('\0').filter(Boolean).length;
+      const currentHead = (await git(path, ['rev-parse', '--verify', 'HEAD'])).trim();
+      if (currentHead !== entry.head) fail('DELETE_PREVIEW_STALE', 'Worktree 状态正在变化，请重新检查后再删除。');
+    }
+    const refs = await git(repo.path, ['for-each-ref', '--format=%(refname)%00%(objectname)%00%(symref)', 'refs/heads/', 'refs/remotes/', 'refs/tags/']);
+    const otherRefs = refs.split('\n').filter(Boolean).map(line => line.split('\0')[0]!).filter(ref => ref !== `refs/heads/${entry.branch}`);
+    if (otherRefs.length > 10_000 || otherRefs.join('').length > 100_000) fail('WORKTREE_UNSAFE', '仓库引用过多，无法完成提交保留检查。');
+    const uniqueCommits = Number((await git(repo.path, ['rev-list', '--count', entry.head, ...(otherRefs.length ? ['--not', ...otherRefs] : []), '--'])).trim());
+    if (!Number.isSafeInteger(uniqueCommits) || uniqueCommits < 0) fail('WORKTREE_UNSAFE', '无法确认提交是否由其他引用保留。');
+    const requiresConfirmation = trackedChanges + untrackedFiles + ignoredFiles > 0 || uniqueCommits > 0 && (deleteBranch || !entry.branch);
+    const warnings: string[] = [];
+    if (!directory.exists) warnings.push('目录已经缺失，将仅清理这条 Git Worktree 注册和应用记录。');
+    if (trackedChanges) warnings.push(`${trackedChanges} 项已跟踪文件修改尚未提交，删除后无法恢复。`);
+    if (untrackedFiles) warnings.push(`${untrackedFiles} 个未跟踪文件将一并删除，无法通过 Git 恢复。`);
+    if (ignoredFiles) warnings.push(`${ignoredFiles} 个被 Git 忽略的文件也会随目录删除。`);
+    if (uniqueCommits > 0) warnings.push(deleteBranch || !entry.branch ? `${uniqueCommits} 个提交未被其他分支或标签保留；删除后可能无法找回。` : `${uniqueCommits} 个独有提交仍由分支 ${entry.branch} 保留。`);
+    warnings.push(deleteBranch ? `同时删除本地分支 ${entry.branch}，不会修改远程仓库。` : entry.branch ? `保留本地分支 ${entry.branch} 及其提交。` : '此目录处于游离 HEAD 状态。');
+    const payload = { worktreeId, path, branch: entry.branch, head: entry.head, deleteBranch, trackedChanges, untrackedFiles, ignoredFiles, uniqueCommits, requiresConfirmation, warnings };
+    const token = createHash('sha256').update(deleteTokenSalt).update(JSON.stringify({ payload, directory, refs, entries, status })).digest('hex');
+    const preview: DeletePreview = { ...payload, token };
+    return { preview, repo };
+  }
   return {
     getSnapshot: () => serial(snapshot),
     addRepository: (path: string) => serial(async (): Promise<Repository> => {
@@ -277,6 +349,39 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
       args.push('--', plan.path, plan.branchExists ? plan.branch : base);
       await git(repo.path, args);
       return worktree(repo, (await listGitWorktrees(repo.path)).find(w => samePath(w.path, plan.path)), record);
+    }),
+    previewDelete: (worktreeId: string, deleteBranch: boolean) => serial(async (): Promise<DeletePreview> => (await deletion(worktreeId, deleteBranch)).preview),
+    deleteWorktree: (input: DeleteInput) => serial(async (): Promise<DeleteOutcome> => {
+      plain(input);
+      if (typeof input.confirmRisks !== 'boolean' || typeof input.token !== 'string' || !/^[0-9a-f]{64}$/.test(input.token)) fail('INVALID_INPUT', '请先检查删除预览并确认风险。');
+      const { preview: plan, repo } = await deletion(input.worktreeId, input.deleteBranch);
+      if (input.token !== plan.token) fail('DELETE_PREVIEW_STALE', '目录、文件或 Git 状态已变化，请重新检查删除预览。');
+      if (plan.requiresConfirmation && !input.confirmRisks) fail('DELETE_CONFIRMATION_REQUIRED', '请明确确认未提交文件或提交丢失风险后再删除。');
+      const args = ['worktree', 'remove'];
+      if (plan.trackedChanges + plan.untrackedFiles > 0) args.push('--force');
+      args.push('--', plan.path);
+      await git(repo.path, args);
+      const warnings: string[] = [];
+      const next = { ...data, managedWorktrees: data.managedWorktrees.filter(w => !(w.repoId === repo.id && samePath(w.path, plan.path))) };
+      try { await save(next); }
+      catch (error) {
+        // The filesystem action succeeded. Reflect it in this process and report the
+        // persistence failure explicitly instead of presenting a failed deletion.
+        data = next;
+        warnings.push(`目录已删除，但应用记录未能保存；重启后可能重新显示缺失记录。${appError(error).message}`);
+      }
+      let branchDeleted = false;
+      if (plan.deleteBranch && plan.branch) {
+        try {
+          const current = await listGitWorktrees(repo.path);
+          if (current.some(w => w.branch === plan.branch)) fail('BRANCH_IN_USE', '该分支已被另一个 Worktree 使用。');
+          // Compare-and-swap protects commits written after the preview. There is no
+          // forceful branch deletion that could silently remove a newer branch tip.
+          await git(repo.path, ['update-ref', '--no-deref', '-d', `refs/heads/${plan.branch}`, plan.head!]);
+          branchDeleted = true;
+        } catch (error) { warnings.push(`目录已删除，但本地分支 ${plan.branch} 未删除，请检查后重试。${appError(error).message}`); }
+      }
+      return { worktreeId: input.worktreeId, path: plan.path, branch: plan.branch, branchDeleted, warnings };
     }),
   };
 }

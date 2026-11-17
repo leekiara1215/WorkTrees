@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import type { AppError, Branch, CreatePreview, RecoveryPreview, Repository, Settings, Worktree } from '../shared/types';
+import type { AppError, Branch, CreatePreview, DeleteOutcome, DeletePreview, RecoveryPreview, Repository, Settings, Worktree } from '../shared/types';
 import { appError, ErrorNotice, Icon, Modal, request, Spinner } from './ui';
 
 export function CreateDialog({ repositories, settings, initialRepoId, onClose, onCreated }: { repositories: Repository[]; settings: Settings; initialRepoId: string; onClose: () => void; onCreated: (worktree: Worktree) => void }) {
@@ -88,6 +88,8 @@ export function SettingsDialog({ settings, repositories, initialRepoId, onClose,
   const [mode, setMode] = useState<PrefixMode>(prefixMode(repository));
   const [prefix, setPrefix] = useState(repository?.branchPrefix ?? '');
   const [saving, setSaving] = useState<'global' | 'repo' | null>(null);
+  const [choosingDirectory, setChoosingDirectory] = useState(false);
+  const rootPathId = useId();
   const [error, setError] = useState<AppError | null>(null);
   const [saved, setSaved] = useState('');
   const [days, setDays] = useState(String(settings.staleDays));
@@ -98,6 +100,15 @@ export function SettingsDialog({ settings, repositories, initialRepoId, onClose,
   function selectRepository(id: string) {
     const next = localRepos.find(repo => repo.id === id);
     setRepoId(id); setMode(prefixMode(next)); setPrefix(next?.branchPrefix ?? ''); setError(null); setSaved('');
+  }
+  async function chooseRootDirectory() {
+    if (busyRef.current) return;
+    busyRef.current = true; setChoosingDirectory(true); setError(null);
+    try {
+      const path = await request(() => window.worktrees.chooseDirectory());
+      if (path !== null) { setDraft(current => ({ ...current, worktreeRoot: path })); setSaved(''); }
+    } catch (error) { setError(appError(error)); }
+    finally { busyRef.current = false; setChoosingDirectory(false); }
   }
   async function saveGlobal() {
     if (busyRef.current || !daysValid || !draft.worktreeRoot.trim()) return;
@@ -113,18 +124,18 @@ export function SettingsDialog({ settings, repositories, initialRepoId, onClose,
     catch (error) { setError(appError(error)); }
     finally { busyRef.current = false; setSaving(null); }
   }
-  return <Modal title="偏好设置" subtitle="为新的工作目录设定默认规则。" onClose={onClose} busy={!!saving} wide>
+  return <Modal title="偏好设置" subtitle="为新的工作目录设定默认规则。" onClose={onClose} busy={(!!saving || choosingDirectory)} wide>
     <div className="modal-body settings-body">
       <section><div className="settings-section-heading"><h3>全局默认</h3><span className="small-badge">新建时生效</span></div><div className="form-stack">
-        <label className="field">Worktree 根路径<input value={draft.worktreeRoot} onChange={event => { setDraft({ ...draft, worktreeRoot: event.target.value }); setSaved(''); }} disabled={!!saving} spellCheck={false} placeholder="~/WorktreesLite" /><span className="field-hint">支持 <code>&lt;REPOSITORY_PATH&gt;</code> 与 <code>&lt;REPOSITORY_NAME&gt;</code>，创建时会展示展开后的完整路径。</span></label>
-        <div className="form-columns"><label className="field">全局分支前缀<input value={draft.branchPrefix} onChange={event => { setDraft({ ...draft, branchPrefix: event.target.value }); setSaved(''); }} disabled={!!saving} placeholder="留空则不加前缀" spellCheck={false} /></label><label className="field">闲置天数<div className="suffix-input"><input type="number" min="1" max="3650" step="1" value={days} onChange={event => { setDays(event.target.value); setSaved(''); }} disabled={!!saving} /><span>天</span></div></label></div>
+        <div className="field"><label htmlFor={rootPathId}>Worktree 根路径</label><div className="directory-picker"><input id={rootPathId} value={draft.worktreeRoot} onChange={event => { setDraft({ ...draft, worktreeRoot: event.target.value }); setSaved(''); }} disabled={!!saving || choosingDirectory} spellCheck={false} placeholder="~/WorktreesLite" /><button type="button" className="button secondary directory-picker-button" onClick={() => void chooseRootDirectory()} disabled={!!saving || choosingDirectory}>{choosingDirectory ? <Spinner label="选择中" /> : <><Icon name="folder" size={15} />选择目录</>}</button></div><span className="field-hint">支持 <code>&lt;REPOSITORY_PATH&gt;</code> 与 <code>&lt;REPOSITORY_NAME&gt;</code>，创建时会展示展开后的完整路径。选择目录后请保存全局设置。</span></div>
+        <div className="form-columns"><label className="field">全局分支前缀<input value={draft.branchPrefix} onChange={event => { setDraft({ ...draft, branchPrefix: event.target.value }); setSaved(''); }} disabled={(!!saving || choosingDirectory)} placeholder="留空则不加前缀" spellCheck={false} /></label><label className="field">闲置天数<div className="suffix-input"><input type="number" min="1" max="3650" step="1" value={days} onChange={event => { setDays(event.target.value); setSaved(''); }} disabled={(!!saving || choosingDirectory)} /><span>天</span></div></label></div>
         {!daysValid && <p className="validation-message">闲置天数请输入 1 至 3650 的整数。</p>}
         <p className="field-hint">闲置状态根据最后活动时间判断。保存这些设置不会移动已有目录或重命名已有分支。</p>
-        <div className="align-end"><button className="button secondary" type="button" onClick={() => void saveGlobal()} disabled={!!saving || !globalChanged || !daysValid || !draft.worktreeRoot.trim()}>{saving === 'global' ? <Spinner label="正在保存" /> : '保存全局设置'}</button></div>
+        <div className="align-end"><button className="button secondary" type="button" onClick={() => void saveGlobal()} disabled={(!!saving || choosingDirectory) || !globalChanged || !daysValid || !draft.worktreeRoot.trim()}>{saving === 'global' ? <Spinner label="正在保存" /> : '保存全局设置'}</button></div>
       </div></section>
-      <section className="repository-settings"><div className="settings-section-heading"><h3>仓库分支前缀</h3></div>{repositories.length ? <div className="form-stack"><label className="field">仓库<select value={repoId} onChange={event => selectRepository(event.target.value)} disabled={!!saving}>{localRepos.map(repo => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select></label><div className="prefix-modes" role="group" aria-label="仓库前缀规则">{([{ id: 'inherit', title: '继承全局', text: savedSettings.branchPrefix || '无前缀' }, { id: 'empty', title: '清空前缀', text: '此仓库不加前缀' }, { id: 'custom', title: '自定义覆盖', text: '使用独立前缀' }] as const).map(item => <label key={item.id} className={`prefix-mode ${mode === item.id ? 'selected' : ''}`}><input type="radio" name="prefix-mode" value={item.id} checked={mode === item.id} onChange={() => { setMode(item.id); setSaved(''); }} disabled={!!saving} /><span><strong>{item.title}</strong><small>{item.text}</small></span></label>)}</div>{mode === 'custom' && <label className="field">仓库专属前缀<input value={prefix} onChange={event => { setPrefix(event.target.value); setSaved(''); }} disabled={!!saving} placeholder="例如 experiment/" spellCheck={false} /></label>}<div className="effective-prefix"><span>当前选择的有效前缀</span><code>{(mode === 'inherit' ? savedSettings.branchPrefix : nextPrefix) || '无前缀'}</code></div><div className="align-end"><button type="button" className="button secondary" onClick={() => void saveRepository()} disabled={!!saving || nextPrefix === repository?.branchPrefix || (mode === 'custom' && !prefix)}>{saving === 'repo' ? <Spinner label="正在保存" /> : '保存仓库前缀'}</button></div></div> : <p className="muted">导入仓库后，可在这里配置仓库专属前缀。</p>}</section>
+      <section className="repository-settings"><div className="settings-section-heading"><h3>仓库分支前缀</h3></div>{repositories.length ? <div className="form-stack"><label className="field">仓库<select value={repoId} onChange={event => selectRepository(event.target.value)} disabled={(!!saving || choosingDirectory)}>{localRepos.map(repo => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select></label><div className="prefix-modes" role="group" aria-label="仓库前缀规则">{([{ id: 'inherit', title: '继承全局', text: savedSettings.branchPrefix || '无前缀' }, { id: 'empty', title: '清空前缀', text: '此仓库不加前缀' }, { id: 'custom', title: '自定义覆盖', text: '使用独立前缀' }] as const).map(item => <label key={item.id} className={`prefix-mode ${mode === item.id ? 'selected' : ''}`}><input type="radio" name="prefix-mode" value={item.id} checked={mode === item.id} onChange={() => { setMode(item.id); setSaved(''); }} disabled={(!!saving || choosingDirectory)} /><span><strong>{item.title}</strong><small>{item.text}</small></span></label>)}</div>{mode === 'custom' && <label className="field">仓库专属前缀<input value={prefix} onChange={event => { setPrefix(event.target.value); setSaved(''); }} disabled={(!!saving || choosingDirectory)} placeholder="例如 experiment/" spellCheck={false} /></label>}<div className="effective-prefix"><span>当前选择的有效前缀</span><code>{(mode === 'inherit' ? savedSettings.branchPrefix : nextPrefix) || '无前缀'}</code></div><div className="align-end"><button type="button" className="button secondary" onClick={() => void saveRepository()} disabled={(!!saving || choosingDirectory) || nextPrefix === repository?.branchPrefix || (mode === 'custom' && !prefix)}>{saving === 'repo' ? <Spinner label="正在保存" /> : '保存仓库前缀'}</button></div></div> : <p className="muted">导入仓库后，可在这里配置仓库专属前缀。</p>}</section>
       <ErrorNotice error={error} />{saved && <p className="saved-notice" role="status"><Icon name="check" size={16} />{saved}</p>}
-    </div><div className="modal-footer"><span className="footer-hint">设置仅保存在本机</span><button type="button" className="button primary" onClick={onClose} disabled={!!saving}>完成</button></div>
+    </div><div className="modal-footer"><span className="footer-hint">设置仅保存在本机</span><button type="button" className="button primary" onClick={onClose} disabled={(!!saving || choosingDirectory)}>完成</button></div>
   </Modal>;
 }
 
@@ -151,5 +162,61 @@ export function RecoveryDialog({ worktree, onClose, onRecovered }: { worktree: W
   return <Modal title="重建缺失 Worktree" subtitle="使用保存的记录，重新创建工作目录。" onClose={onClose} busy={saving}>
     <div className="modal-body form-stack">{loading && <div className="dialog-loading"><Spinner label="正在检查分支与目录" /></div>}{preview && <><div className="recovery-explanation"><span className="recovery-icon"><Icon name="restore" size={23} /></span><div><strong>{preview.action === 'recreate-existing-branch' ? '使用已有分支重建' : '从记录的基准分支重建'}</strong><p>{preview.action === 'recreate-existing-branch' ? '分支仍然存在，将检出该分支到原目录。' : '原分支已不存在，将从下方基准分支重新创建分支与目录。'}</p></div></div><div className="preview-panel ready"><dl className="preview-values"><div><dt>仓库</dt><dd>{worktree.repoName}</dd></div><div><dt>目标分支</dt><dd>{preview.branch}</dd></div>{preview.action === 'recreate-from-base' && <div><dt>基准分支</dt><dd>{preview.baseBranch ?? '无可用基准分支'}</dd></div>}<div><dt>恢复目录</dt><dd className="path-value">{preview.path}</dd></div></dl></div>{preview.warnings.length > 0 && <ul className="warning-list">{preview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}<div className="safety-note"><Icon name="alert" size={18} /><p>重建不会恢复未提交的文件。目标目录必须不存在，已有目录不会被覆盖。</p></div></>}<ErrorNotice error={error} onRetry={() => setReload(value => value + 1)} /></div>
     <div className="modal-footer"><span className="footer-hint">失败后保留记录，可再次重试</span><div className="button-row"><button type="button" className="button secondary" onClick={onClose} disabled={saving}>取消</button><button type="button" className="button primary" onClick={() => void recover()} disabled={saving || loading || !preview || (preview.action === 'recreate-from-base' && !preview.baseBranch)}>{saving ? <Spinner label="正在重建" /> : <><Icon name="restore" size={16} />确认重建</>}</button></div></div>
+  </Modal>;
+}
+
+export function DeleteDialog({ worktree, onClose, onDeleted }: { worktree: Worktree; onClose: () => void; onDeleted: (outcome: DeleteOutcome) => void }) {
+  const [deleteBranch, setDeleteBranch] = useState(false);
+  const [preview, setPreview] = useState<{ key: string; data: DeletePreview } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [previewError, setPreviewError] = useState<AppError | null>(null);
+  const [operationError, setOperationError] = useState<AppError | null>(null);
+  const [reload, setReload] = useState(0);
+  const busyRef = useRef(false);
+  const key = JSON.stringify([worktree.id, deleteBranch, reload]);
+  const currentPreview = preview?.key === key ? preview.data : null;
+  const displayedBranch = currentPreview ? currentPreview.branch : worktree.branch;
+  const canDelete = !worktree.isMain && !worktree.locked && !loading && !!currentPreview && (!currentPreview.requiresConfirmation || confirmed);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true); setPreview(null); setPreviewError(null); setConfirmed(false);
+    request(() => window.worktrees.previewDelete(worktree.id, deleteBranch)).then(data => {
+      if (active) setPreview({ key, data });
+    }).catch(error => { if (active) setPreviewError(appError(error)); }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [worktree.id, deleteBranch, key]);
+
+  function refreshPreview() {
+    if (busyRef.current) return;
+    setConfirmed(false); setOperationError(null); setPreview(null); setReload(value => value + 1);
+  }
+  async function remove() {
+    if (busyRef.current || !canDelete || !currentPreview) return;
+    busyRef.current = true; setSaving(true); setOperationError(null);
+    try {
+      const result = await request(() => window.worktrees.deleteWorktree({ worktreeId: worktree.id, deleteBranch: currentPreview.deleteBranch, token: currentPreview.token, confirmRisks: confirmed }));
+      onDeleted(result);
+    } catch (error) {
+      setOperationError(appError(error)); setConfirmed(false); setPreview(null); setReload(value => value + 1);
+    } finally { busyRef.current = false; setSaving(false); }
+  }
+  return <Modal title="安全删除 Worktree" subtitle="确认工作目录和检查结果后，再执行删除。" onClose={onClose} busy={saving}>
+    <div className="modal-body form-stack">
+      <div className="preview-panel delete-target"><dl className="preview-values"><div><dt>仓库</dt><dd>{worktree.repoName}</dd></div><div><dt>分支</dt><dd>{displayedBranch || '游离 HEAD'}</dd></div>{currentPreview?.head && <div><dt>当前提交</dt><dd>{currentPreview.head.slice(0, 12)}</dd></div>}<div><dt>删除目录</dt><dd className="path-value">{currentPreview?.path || worktree.path}</dd></div></dl></div>
+      {displayedBranch ? <label className="delete-option"><input type="checkbox" checked={deleteBranch} onChange={event => { setDeleteBranch(event.target.checked); setConfirmed(false); setPreview(null); setOperationError(null); }} disabled={saving} /><span><strong>同时删除本地分支</strong><small>{deleteBranch ? '删除分支前，会检查其他分支和标签未包含的提交。' : '默认只删除工作目录，保留本地分支和已提交的代码。'}</small></span></label> : <p className="inline-hint">当前处于游离 HEAD，将检查是否有未被分支或标签保留的提交。</p>}
+      {loading && <div className="dialog-loading"><Spinner label="正在检查修改与提交" /></div>}
+      {currentPreview && <>
+        <div className="delete-checks" aria-live="polite"><div><span>已跟踪文件修改</span><strong>{currentPreview.trackedChanges}</strong></div><div><span>未跟踪文件</span><strong>{currentPreview.untrackedFiles}</strong></div><div><span>被忽略的文件</span><strong>{currentPreview.ignoredFiles}</strong></div><div><span>其他引用未包含的提交</span><strong>{currentPreview.uniqueCommits}</strong></div></div>
+        {currentPreview.warnings.length > 0 && <ul className="warning-list">{currentPreview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
+        <div className="safety-note delete-safety-note"><Icon name="alert" size={18} /><p>删除会移除上述目录及其中的文件。{currentPreview.deleteBranch ? '所选本地分支也会删除。' : currentPreview.branch ? '本地分支将保留。' : '游离 HEAD 没有对应的本地分支。'}此操作无法在应用内撤销。</p></div>
+        {currentPreview.requiresConfirmation && <label className="delete-option risk-confirmation"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} disabled={saving} /><span><strong>我已确认以上风险，并同意删除</strong><small>未提交、未跟踪及被忽略的文件可能永久丢失；删除分支或游离 HEAD 可能丢失独有提交。</small></span></label>}
+      </>}
+      <ErrorNotice error={operationError} />
+      <ErrorNotice error={previewError} onRetry={refreshPreview} />
+    </div>
+    <div className="modal-footer"><button type="button" className="text-button" onClick={refreshPreview} disabled={saving || loading}>重新检查</button><div className="button-row"><button type="button" className="button secondary" onClick={onClose} disabled={saving}>取消</button><button type="button" className="button danger" onClick={() => void remove()} disabled={saving || !canDelete}>{saving ? <Spinner label="正在删除" /> : <><Icon name="trash" size={15} />{deleteBranch ? '删除目录与分支' : '确认删除目录'}</>}</button></div></div>
   </Modal>;
 }

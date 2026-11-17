@@ -13,6 +13,13 @@ export interface Snapshot { settings: Settings; repositories: Repository[]; work
 export interface CreateInput { repoId: string; baseBranch: string; branchName: string }
 export interface CreatePreview { repoId: string; branch: string; baseBranch: string; path: string; warnings: string[] }
 export interface RecoveryPreview { worktreeId: string; path: string; branch: string; baseBranch: string | null; branchExists: boolean; action: 'recreate-existing-branch' | 'recreate-from-base'; warnings: string[] }
+export interface DeletePreview {
+  worktreeId: string; path: string; branch: string | null; head: string | null;
+  deleteBranch: boolean; trackedChanges: number; untrackedFiles: number; ignoredFiles: number;
+  uniqueCommits: number; requiresConfirmation: boolean; warnings: string[]; token: string;
+}
+export interface DeleteInput { worktreeId: string; deleteBranch: boolean; token: string; confirmRisks: boolean }
+export interface DeleteOutcome { worktreeId: string; path: string; branch: string | null; branchDeleted: boolean; warnings: string[] }
 export interface AppApi {
   getSnapshot(): Promise<Result<Snapshot>>;
   chooseDirectory(): Promise<Result<string | null>>;
@@ -25,6 +32,8 @@ export interface AppApi {
   createWorktree(input: CreateInput): Promise<Result<Worktree>>;
   previewRecovery(worktreeId: string): Promise<Result<RecoveryPreview>>;
   recreateWorktree(worktreeId: string): Promise<Result<Worktree>>;
+  previewDelete(worktreeId: string, deleteBranch: boolean): Promise<Result<DeletePreview>>;
+  deleteWorktree(input: DeleteInput): Promise<Result<DeleteOutcome>>;
   revealPath(path: string): Promise<Result<void>>;
   copyText(text: string): Promise<Result<void>>;
 }

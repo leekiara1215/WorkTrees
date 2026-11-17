@@ -47,7 +47,7 @@ async function createWindow() {
 if (instanceLock) app.whenReady().then(async () => {
   const service = createWorktreeService({ dataDir: app.getPath('userData') });
   // Service validates every argument, including calls from untyped IPC boundaries.
-  const methods = ['getSnapshot', 'addRepository', 'removeRepository', 'updateRepository', 'updateSettings', 'listBranches', 'previewCreate', 'createWorktree', 'previewRecovery', 'recreateWorktree'] as const;
+  const methods = ['getSnapshot', 'addRepository', 'removeRepository', 'updateRepository', 'updateSettings', 'listBranches', 'previewCreate', 'createWorktree', 'previewRecovery', 'recreateWorktree', 'previewDelete', 'deleteWorktree'] as const;
   for (const method of methods) handle(method, (...args) => Reflect.apply(service[method], service, args));
   handle('chooseDirectory', async () => {
     const result = await dialog.showOpenDialog(mainWindow!, { title: '选择文件夹', properties: ['openDirectory', 'createDirectory'] });
