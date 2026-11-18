@@ -1,0 +1,22 @@
+WorkTrees Lite — macOS 内部测试版
+
+本包仅用于团队内部测试，采用 ad-hoc 本地签名，尚未取得 Apple Developer ID 签名或 Apple 公证。
+签名校验通过仅代表包内代码和资源完整，不代表 Apple 已验证开发者或软件安全性。
+
+请按 DMG 文件名选择电脑类型：arm64 适用于 Apple Silicon（M 系列芯片），不适用于 Intel Mac；x64 适用于 Intel Mac。
+
+安装与首次打开
+1. 退出已经运行的旧版 WorkTrees Lite。
+2. 将 WorkTrees Lite.app 拖入 Applications，安装后从“应用程序”打开。
+3. 下载的内部测试应用可能被 macOS 的开发者身份/公证检查拦截。
+   确认安装包来自你信任的项目维护者且文件未被篡改后，先尝试打开一次，
+   再进入“系统设置 → 隐私与安全性”，在安全性区域选择“仍要打开”，并确认“打开”。
+4. 如果没有“仍要打开”或仍然提示损坏，停止操作并将截图及 macOS 版本发给维护者。
+   不需要关闭整个系统的 Gatekeeper，也不要修改与本应用无关的安全设置。
+
+使用前需要安装 Git。应用配置和子模块备份保存在当前用户的应用数据目录，替换 .app 不会清空这些数据。
+
+收到文件后可比对旁边的 .sha256 校验文件。签名检查命令（安装后）：
+codesign --verify --deep --strict --verbose=2 "/Applications/WorkTrees Lite.app"
+
+Apple 官方首次打开说明：https://support.apple.com/zh-cn/102445

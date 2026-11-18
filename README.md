@@ -2,13 +2,13 @@
 
 一个本地 Git Worktree 桌面管理器，支持创建、目录/命名配置、列表/搜索/筛选、异常识别、重建与安全删除。交互参考本机 Kepler，代码独立实现。
 
-当前正式版本：**v1.0.0**；当前源码开发版本：**v1.1.0**。发布说明见 [CHANGELOG.md](CHANGELOG.md)。
+当前正式版本为 **v1.0.0**，最新预发行版为 **v1.1.1**。参见 [发布记录](CHANGELOG.md)。
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/leekiara1215/WorkTrees/releases) 下载 macOS Apple Silicon（arm64）应用压缩包，解压后打开 `WorkTrees Lite.app`。使用应用需要本机已安装 Git，无需 Node.js 或 Kepler。
+从 [v1.1.1 发布页](https://github.com/leekiara1215/WorkTrees/releases/tag/v1.1.1) 下载 macOS Apple Silicon（arm64）DMG，打开后把 `WorkTrees Lite.app` 拖入「应用程序」。[v1.0.0 应用压缩包](https://github.com/leekiara1215/WorkTrees/releases/tag/v1.0.0) 仍可下载。使用应用需要本机已安装 Git。
 
-当前应用未签名、未公证，适合本机使用；从互联网下载时 macOS 可能提示无法验证开发者。Windows、Linux、Intel Mac 暂未验收。
+v1.1.1 起的 macOS 内部测试构建使用完整 ad-hoc 签名并校验嵌套代码及资源完整性；没有 Developer ID 身份签名或 Apple 公证，不保证下载后自动通过 Gatekeeper。接收人首次打开时，确认来源可信后可按 [Apple 官方说明](https://support.apple.com/zh-cn/102445)，在“系统设置 → 隐私与安全性”中选择“仍要打开”。旧 v1.1.0 包存在 Electron 残留签名无效的问题，请改发新版内部测试包。Windows、Linux、Intel Mac 暂未验收。
 
 ## 运行
 
@@ -32,6 +32,14 @@ npm start
 npm run package
 ```
 
+生成「星际投递」主题的 macOS 内部测试 DMG，并放入下载目录。打开后，沿星光航线将 WorkTrees Lite 从发射台拖到右侧的 Applications 停靠舱。[内部测试安装说明](resources/INSTALL-internal.zh-CN.txt) 单独保留，不占用安装窗口。打包须在已登录的 macOS 桌面中运行，需要 Xcode 命令行工具，首次提示时允许终端控制 Finder：
+
+```sh
+npm run package:dmg -- ~/Downloads
+```
+
+文件名包含 `internal` 和架构；打包会验证签名、DMG 校验和、挂载后应用的签名及资源一致性，并生成 `.sha256` 文件。ad-hoc 签名只校验完整性，不等于 Apple 已认可开发者或通过公证。分发给普通用户且希望通过系统分发检查时，需要另行配置 Developer ID 签名和 Apple 公证。
+
 产物在 `release/v<版本号>/`，可直接打开，不需要开发服务器。首次打开应用无需导入任何真实仓库。
 
 v1.0.0 的 macOS Apple Silicon 应用路径：`release/v1.0.0/WorkTrees Lite-darwin-arm64/WorkTrees Lite.app`。当前构建使用 Electron 45.3.3；无需安装或启动 Kepler。
@@ -44,6 +52,7 @@ v1.0.0 的 macOS Apple Silicon 应用路径：`release/v1.0.0/WorkTrees Lite-dar
 4. 在列表中按仓库、分支/路径文字、状态筛选，随时刷新磁盘状态。
 5. 在设置中调整 Worktree 根目录、全局前缀、闲置阈值；仓库可以继承或覆盖分支前缀。
 6. 应用创建的 Worktree 如果目录丢失，可查看重建预览，再确认恢复到记录中的路径。分支不存在时会明确显示从基准重建。
+7. 在「偏好设置 → 主题色」点选配色，界面立即换色并自动保存选择。
 
 默认根目录为 `~/WorktreesLite`，分支前缀为 `wt/`。根目录支持 `<REPOSITORY_NAME>`、`<REPOSITORY_PATH>` 变量。例如 `/path/to/worktrees/<REPOSITORY_NAME>`。名称和目录以创建预览为准。用户数据只保存在应用的本地 userData 目录。
 

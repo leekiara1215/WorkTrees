@@ -1,6 +1,8 @@
+import type { ThemeColor } from './theme-colors.js';
+
 export interface AppError { code: string; message: string; details?: string; retryable?: boolean }
 export type Result<T> = { ok: true; data: T } | { ok: false; error: AppError };
-export interface Settings { worktreeRoot: string; branchPrefix: string; staleDays: number }
+export interface Settings { worktreeRoot: string; branchPrefix: string; staleDays: number; themeColor: ThemeColor }
 export interface Repository { id: string; name: string; path: string; defaultBranch: string | null; branchPrefix: string | null; addedAt: string }
 export interface Branch { name: string; remote: boolean; current: boolean }
 export interface Worktree {

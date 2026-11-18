@@ -1,6 +1,6 @@
 {
   "name": "worktrees-lite",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "description": "A small local Git worktree manager",
   "type": "module",
@@ -13,7 +13,8 @@
     "build": "npm run typecheck && npm run build:main && vite build",
     "start": "npm run setup:electron && node scripts/start.mjs",
     "test": "tsx --test tests/*.test.ts",
-    "package": "npm run build && node scripts/package.mjs"
+    "package": "npm run build && node scripts/package.mjs",
+    "package:dmg": "npm run package && node scripts/package-dmg.mjs"
   },
   "dependencies": {
     "react": "19.3.1",

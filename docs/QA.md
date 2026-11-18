@@ -1,5 +1,15 @@
 # WorkTrees Lite 集成验证
 
+## v1.1.1 内部测试分发验收
+
+- 复现旧 v1.1.0 应用签名验证失败：`code has no resources but signature indicates they must be present`。旧签名标识仍为 Electron，Info.plist 未绑定且没有完整资源封装。
+- macOS 打包显式使用 `@electron/osx-sign` 完成 ad-hoc 签名，随后严格验证整个应用及嵌套组件，检查应用标识与资源封装；签名失败不会产出成功结果。
+- 新增四项真实 macOS 签名测试：完整应用及嵌套 helper 可通过校验；顶层资源篡改、嵌套资源篡改、替换成未完整封装的二进制均被拒绝。完整回归 78 项通过、0 失败。TypeScript、脚本语法检查和生产构建通过。
+- 内部测试 DMG 校验和正确；只读挂载后再次通过应用签名校验，app.asar 和 CodeResources 与源构建一致。安装窗口仅显示应用和带自定义图标的 Applications 替身；首次打开说明见 README，校验文件随包输出。
+- 对打包后的 v1.1.1 应用使用临时 profile 和真实临时仓库完成启动、子模块删除确认与备份结果展示验证。
+- 从只读挂载的 DMG 启动应用，使用临时配置和 Git 仓库验证六种配色、全局即时换色、重启恢复、保存失败回退，以及最小窗口下的偏好设置布局。切换期间保留搜索内容和设置草稿。
+- 本构建无 Developer ID 身份签名和 Apple 公证，`spctl --assess` 仍为 rejected；完整性验证成功不代表 Gatekeeper 自动接受。接收人首次打开可能需要按 Apple 的“仍要打开”流程手动允许，未声称已完成其他电脑的实机验收。
+
 ## 子模块安全删除增量验收
 
 - 最终完整回归：73 项通过、0 失败、0 跳过；应用及测试的 TypeScript 检查、生产构建、macOS arm64 打包均通过。

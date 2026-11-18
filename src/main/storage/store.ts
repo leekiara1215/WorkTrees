@@ -2,6 +2,7 @@ import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { DEFAULT_THEME_COLOR, isThemeColor } from '../../shared/theme-colors.js';
 import type { Repository, Settings } from '../../shared/types.js';
 import { ServiceError } from '../git/client.js';
 
@@ -12,7 +13,7 @@ export interface StoreData {
   version: 1; settings: Settings; repositories: Repository[]; managedWorktrees: ManagedWorktree[];
 }
 
-export const defaultSettings = (): Settings => ({ worktreeRoot: join(homedir(), 'WorktreesLite'), branchPrefix: 'wt/', staleDays: 14 });
+export const defaultSettings = (): Settings => ({ worktreeRoot: join(homedir(), 'WorktreesLite'), branchPrefix: 'wt/', staleDays: 14, themeColor: DEFAULT_THEME_COLOR });
 
 export function createStore(dataDir: string) {
   const file = join(dataDir, 'worktrees.json');
@@ -34,6 +35,7 @@ export function createStore(dataDir: string) {
           || data.managedWorktrees.some(w => !w || !['id', 'repoId', 'path', 'branch', 'baseBranch', 'createdAt'].every(k => typeof (w as unknown as Record<string, unknown>)[k] === 'string'))) {
           throw new Error('Unsupported or invalid data schema');
         }
+        if (!isThemeColor(data.settings.themeColor)) data.settings.themeColor = DEFAULT_THEME_COLOR;
         return data;
       } catch (error) {
         throw new ServiceError('STORAGE_CORRUPT', '本地配置文件损坏，已保留原文件，请先备份并修复。', `${file}: ${String(error)}`);

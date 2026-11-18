@@ -1,0 +1,100 @@
+:root,
+.theme-option[data-color="green"] {
+  --theme-color: #39765c;
+}
+
+:root[data-theme="blue"],
+.theme-option[data-color="blue"] {
+  --theme-color: #356fba;
+}
+
+:root[data-theme="purple"],
+.theme-option[data-color="purple"] {
+  --theme-color: #7956a8;
+}
+
+:root[data-theme="red"],
+.theme-option[data-color="red"] {
+  --theme-color: #b44d61;
+}
+
+:root[data-theme="orange"],
+.theme-option[data-color="orange"] {
+  --theme-color: #ac581e;
+}
+
+:root[data-theme="teal"],
+.theme-option[data-color="teal"] {
+  --theme-color: #207982;
+}
+
+:root {
+  --accent: var(--theme-color);
+  --accent-dark: color-mix(in srgb, var(--accent) 76%, #151c1c);
+  --accent-muted: color-mix(in srgb, var(--accent) 64%, white);
+  --accent-subtle: color-mix(in srgb, var(--accent) 7%, white);
+  --accent-soft: color-mix(in srgb, var(--accent) 12%, white);
+  --accent-selected: color-mix(in srgb, var(--accent) 19%, white);
+  --canvas: color-mix(in srgb, var(--accent) 3%, white);
+  --panel: color-mix(in srgb, var(--accent) 2%, white);
+  --surface: #fff;
+  --border: color-mix(in srgb, var(--accent) 15%, white);
+  --border-strong: color-mix(in srgb, var(--accent) 29%, white);
+  --focus: var(--accent-muted);
+  --focus-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+  --shadow: 0 2px 5px color-mix(in srgb, var(--accent-dark) 7%, transparent);
+  --text: color-mix(in srgb, var(--accent) 21%, #20282a);
+  --text-secondary: color-mix(in srgb, var(--accent) 30%, #59625e);
+  --muted: color-mix(in srgb, var(--accent) 26%, #818984);
+  --placeholder: color-mix(in srgb, var(--accent) 24%, #b0b6b2);
+  accent-color: var(--accent);
+}
+
+.theme-options {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.theme-option {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 4px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.theme-option[aria-disabled="true"] {
+  cursor: wait;
+}
+
+.theme-option:hover:not([aria-disabled="true"]) {
+  border-color: var(--border-strong);
+  background: var(--accent-subtle);
+}
+
+.theme-option[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  color: var(--accent-dark);
+  font-weight: 600;
+}
+
+.theme-swatch {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  color: white;
+  background: var(--theme-color);
+}
+
+.theme-options + .error-notice {
+  margin-top: 12px;
+}

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
+import { isThemeColor } from '../shared/theme-colors.js';
 import type { AppError, Branch, CreateInput, CreatePreview, DeleteInput, DeleteOutcome, DeletePreview, RecoveryPreview, Repository, Settings, Snapshot, Worktree } from '../shared/types.js';
 import { git, listGitWorktrees, ServiceError, type GitWorktree } from './git/client.js';
 import { createStore, type ManagedWorktree, type StoreData } from './storage/store.js';
@@ -310,7 +311,7 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     }),
     updateSettings: (patch: Partial<Settings>) => serial(async (): Promise<Settings> => {
       plain(patch);
-      if (Object.keys(patch).some(k => !['worktreeRoot', 'branchPrefix', 'staleDays'].includes(k))) fail('INVALID_INPUT', '设置包含未知字段。');
+      if (Object.keys(patch).some(k => !['worktreeRoot', 'branchPrefix', 'staleDays', 'themeColor'].includes(k))) fail('INVALID_INPUT', '设置包含未知字段。');
       const next = { ...data.settings };
       if (patch.worktreeRoot !== undefined) {
         next.worktreeRoot = text(patch.worktreeRoot, 'Worktree 根目录', 4096);
@@ -323,6 +324,10 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
       if (patch.staleDays !== undefined) {
         if (!Number.isInteger(patch.staleDays) || patch.staleDays < 1 || patch.staleDays > 3650) fail('INVALID_INPUT', '闲置天数必须是 1–3650 的整数。');
         next.staleDays = patch.staleDays;
+      }
+      if (patch.themeColor !== undefined) {
+        if (!isThemeColor(patch.themeColor)) fail('INVALID_INPUT', '请选择有效的主题色。');
+        next.themeColor = patch.themeColor;
       }
       await save({ ...data, settings: next }); return { ...next };
     }),

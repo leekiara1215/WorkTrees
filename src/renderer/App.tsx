@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { DEFAULT_THEME_COLOR, type ThemeColor } from '../shared/theme-colors';
 import type { AppError, DeleteOutcome, Repository, Snapshot, Worktree } from '../shared/types';
 import { CreateDialog, DeleteDialog, RecoveryDialog, SettingsDialog } from './dialogs';
 import { appError, ErrorNotice, Icon, request, Spinner } from './ui';
@@ -19,6 +20,8 @@ function folderName(path: string) { return path.replace(/[\\/]+$/, '').split(/[\
 
 export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [preferredTheme, setThemeColor] = useState<ThemeColor | null>(null);
+  const themeColor = preferredTheme ?? DEFAULT_THEME_COLOR;
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<AppError | null>(null);
   const [actionError, setActionError] = useState<AppError | null>(null);
@@ -42,11 +45,13 @@ export default function App() {
       const data = await request(() => window.worktrees.getSnapshot());
       if (sequence !== loadSequence.current || !mounted.current) return;
       setSnapshot(data);
+      setThemeColor(current => current ?? data.settings.themeColor);
       setRepoId(current => data.repositories.some(repository => repository.id === current) ? current : '');
     } catch (error) { if (sequence === loadSequence.current && mounted.current) setLoadError(appError(error)); }
     finally { if (sequence === loadSequence.current && mounted.current) setLoading(false); }
   }, []);
   useEffect(() => { mounted.current = true; void refresh(); return () => { mounted.current = false; ++loadSequence.current; }; }, [refresh]);
+  useLayoutEffect(() => { document.documentElement.dataset.theme = themeColor; }, [themeColor]);
   useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(''), 5000); return () => window.clearTimeout(timer); }, [toast]);
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k' && !dialog) { event.preventDefault(); searchInput.current?.focus(); } };
@@ -128,7 +133,7 @@ export default function App() {
     </div>
     {toast && <div className="toast" role="status"><Icon name="check" size={17} />{toast}<button type="button" className="icon-button" aria-label="关闭提示" onClick={() => setToast('')}><Icon name="close" size={14} /></button></div>}
     {dialog?.kind === 'create' && snapshot && <CreateDialog repositories={repositories} settings={snapshot.settings} initialRepoId={repoId} onClose={() => setDialog(null)} onCreated={worktree => completed(worktree)} />}
-    {dialog?.kind === 'settings' && snapshot && <SettingsDialog settings={snapshot.settings} repositories={repositories} initialRepoId={repoId} onClose={() => setDialog(null)} onUpdated={() => void refresh()} />}
+    {dialog?.kind === 'settings' && snapshot && <SettingsDialog settings={snapshot.settings} themeColor={themeColor} onThemeChange={setThemeColor} repositories={repositories} initialRepoId={repoId} onClose={() => setDialog(null)} onUpdated={() => void refresh()} />}
     {dialog?.kind === 'delete' && <DeleteDialog worktree={dialog.worktree} onClose={() => setDialog(null)} onDeleted={deleted} />}
     {dialog?.kind === 'recovery' && <RecoveryDialog worktree={dialog.worktree} onClose={() => setDialog(null)} onRecovered={worktree => completed(worktree, true)} />}
   </>;

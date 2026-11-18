@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import { THEME_COLORS, type ThemeColor } from '../shared/theme-colors';
 import type { AppError, Branch, CreatePreview, DeleteOutcome, DeletePreview, RecoveryPreview, Repository, Settings, SubmoduleDeletePreview, Worktree } from '../shared/types';
 import { appError, ErrorNotice, Icon, Modal, request, Spinner } from './ui';
 
@@ -79,7 +80,7 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
 type PrefixMode = 'inherit' | 'empty' | 'custom';
 function prefixMode(repo?: Repository): PrefixMode { return repo?.branchPrefix === null || repo?.branchPrefix === undefined ? 'inherit' : repo.branchPrefix === '' ? 'empty' : 'custom'; }
 
-export function SettingsDialog({ settings, repositories, initialRepoId, onClose, onUpdated }: { settings: Settings; repositories: Repository[]; initialRepoId: string; onClose: () => void; onUpdated: () => void }) {
+export function SettingsDialog({ settings, themeColor, onThemeChange, repositories, initialRepoId, onClose, onUpdated }: { settings: Settings; themeColor: ThemeColor; onThemeChange: (color: ThemeColor) => void; repositories: Repository[]; initialRepoId: string; onClose: () => void; onUpdated: () => void }) {
   const [draft, setDraft] = useState(settings);
   const [savedSettings, setSavedSettings] = useState(settings);
   const [repoId, setRepoId] = useState(initialRepoId || repositories[0]?.id || '');
@@ -87,16 +88,34 @@ export function SettingsDialog({ settings, repositories, initialRepoId, onClose,
   const repository = localRepos.find(repo => repo.id === repoId);
   const [mode, setMode] = useState<PrefixMode>(prefixMode(repository));
   const [prefix, setPrefix] = useState(repository?.branchPrefix ?? '');
-  const [saving, setSaving] = useState<'global' | 'repo' | null>(null);
+  const [saving, setSaving] = useState<'theme' | 'global' | 'repo' | null>(null);
   const [choosingDirectory, setChoosingDirectory] = useState(false);
   const rootPathId = useId();
+  const themeHeadingId = useId();
+  const [themeError, setThemeError] = useState<AppError | null>(null);
   const [error, setError] = useState<AppError | null>(null);
   const [saved, setSaved] = useState('');
   const [days, setDays] = useState(String(settings.staleDays));
   const busyRef = useRef(false);
   const nextPrefix = mode === 'inherit' ? null : mode === 'empty' ? '' : prefix;
+  const busy = !!saving || choosingDirectory;
   const globalChanged = draft.worktreeRoot !== savedSettings.worktreeRoot || draft.branchPrefix !== savedSettings.branchPrefix || days !== String(savedSettings.staleDays);
   const daysValid = /^\d+$/.test(days) && Number(days) >= 1 && Number(days) <= 3650;
+  async function changeThemeColor(color: ThemeColor) {
+    if (busyRef.current || color === themeColor) return;
+    busyRef.current = true;
+    setSaving('theme');
+    setThemeError(null);
+    onThemeChange(color);
+    try { await request(() => window.worktrees.updateSettings({ themeColor: color })); }
+    catch (error) {
+      onThemeChange(themeColor);
+      setThemeError(appError(error));
+    } finally {
+      busyRef.current = false;
+      setSaving(null);
+    }
+  }
   function selectRepository(id: string) {
     const next = localRepos.find(repo => repo.id === id);
     setRepoId(id); setMode(prefixMode(next)); setPrefix(next?.branchPrefix ?? ''); setError(null); setSaved('');
@@ -113,7 +132,7 @@ export function SettingsDialog({ settings, repositories, initialRepoId, onClose,
   async function saveGlobal() {
     if (busyRef.current || !daysValid || !draft.worktreeRoot.trim()) return;
     busyRef.current = true; setSaving('global'); setError(null); setSaved('');
-    try { const data = await request(() => window.worktrees.updateSettings({ ...draft, worktreeRoot: draft.worktreeRoot.trim(), staleDays: Number(days) })); setDraft(data); setSavedSettings(data); setDays(String(data.staleDays)); setSaved('全局设置已保存'); onUpdated(); }
+    try { const data = await request(() => window.worktrees.updateSettings({ worktreeRoot: draft.worktreeRoot.trim(), branchPrefix: draft.branchPrefix, staleDays: Number(days) })); setDraft(data); setSavedSettings(data); setDays(String(data.staleDays)); setSaved('全局设置已保存'); onUpdated(); }
     catch (error) { setError(appError(error)); }
     finally { busyRef.current = false; setSaving(null); }
   }
@@ -124,16 +143,26 @@ export function SettingsDialog({ settings, repositories, initialRepoId, onClose,
     catch (error) { setError(appError(error)); }
     finally { busyRef.current = false; setSaving(null); }
   }
-  return <Modal title="偏好设置" subtitle="为新的工作目录设定默认规则。" onClose={onClose} busy={(!!saving || choosingDirectory)} wide>
+  return <Modal title="偏好设置" onClose={onClose} busy={busy} wide>
     <div className="modal-body settings-body">
-      <section><div className="settings-section-heading"><h3>全局默认</h3><span className="small-badge">新建时生效</span></div><div className="form-stack">
+      <section>
+        <div className="settings-section-heading"><h3 id={themeHeadingId}>主题色</h3></div>
+        <div className="theme-options" role="group" aria-labelledby={themeHeadingId}>
+          {THEME_COLORS.map(({ id, label }) => <button key={id} type="button" className="theme-option" data-color={id} aria-pressed={themeColor === id} aria-disabled={busy} onClick={() => void changeThemeColor(id)}>
+            <span className="theme-swatch">{themeColor === id && <Icon name="check" size={13} />}</span>
+            <span>{label}</span>
+          </button>)}
+        </div>
+        <ErrorNotice error={themeError} />
+      </section>
+      <section className="settings-section"><div className="settings-section-heading"><h3>全局默认</h3><span className="small-badge">新建时生效</span></div><div className="form-stack">
         <div className="field"><label htmlFor={rootPathId}>Worktree 根路径</label><div className="directory-picker"><input id={rootPathId} value={draft.worktreeRoot} onChange={event => { setDraft({ ...draft, worktreeRoot: event.target.value }); setSaved(''); }} disabled={!!saving || choosingDirectory} spellCheck={false} placeholder="~/WorktreesLite" /><button type="button" className="button secondary directory-picker-button" onClick={() => void chooseRootDirectory()} disabled={!!saving || choosingDirectory}>{choosingDirectory ? <Spinner label="选择中" /> : <><Icon name="folder" size={15} />选择目录</>}</button></div><span className="field-hint">支持 <code>&lt;REPOSITORY_PATH&gt;</code> 与 <code>&lt;REPOSITORY_NAME&gt;</code>，创建时会展示展开后的完整路径。选择目录后请保存全局设置。</span></div>
         <div className="form-columns"><label className="field">全局分支前缀<input value={draft.branchPrefix} onChange={event => { setDraft({ ...draft, branchPrefix: event.target.value }); setSaved(''); }} disabled={(!!saving || choosingDirectory)} placeholder="留空则不加前缀" spellCheck={false} /></label><label className="field">闲置天数<div className="suffix-input"><input type="number" min="1" max="3650" step="1" value={days} onChange={event => { setDays(event.target.value); setSaved(''); }} disabled={(!!saving || choosingDirectory)} /><span>天</span></div></label></div>
         {!daysValid && <p className="validation-message">闲置天数请输入 1 至 3650 的整数。</p>}
         <p className="field-hint">闲置状态根据最后活动时间判断。保存这些设置不会移动已有目录或重命名已有分支。</p>
         <div className="align-end"><button className="button secondary" type="button" onClick={() => void saveGlobal()} disabled={(!!saving || choosingDirectory) || !globalChanged || !daysValid || !draft.worktreeRoot.trim()}>{saving === 'global' ? <Spinner label="正在保存" /> : '保存全局设置'}</button></div>
       </div></section>
-      <section className="repository-settings"><div className="settings-section-heading"><h3>仓库分支前缀</h3></div>{repositories.length ? <div className="form-stack"><label className="field">仓库<select value={repoId} onChange={event => selectRepository(event.target.value)} disabled={(!!saving || choosingDirectory)}>{localRepos.map(repo => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select></label><div className="prefix-modes" role="group" aria-label="仓库前缀规则">{([{ id: 'inherit', title: '继承全局', text: savedSettings.branchPrefix || '无前缀' }, { id: 'empty', title: '清空前缀', text: '此仓库不加前缀' }, { id: 'custom', title: '自定义覆盖', text: '使用独立前缀' }] as const).map(item => <label key={item.id} className={`prefix-mode ${mode === item.id ? 'selected' : ''}`}><input type="radio" name="prefix-mode" value={item.id} checked={mode === item.id} onChange={() => { setMode(item.id); setSaved(''); }} disabled={(!!saving || choosingDirectory)} /><span><strong>{item.title}</strong><small>{item.text}</small></span></label>)}</div>{mode === 'custom' && <label className="field">仓库专属前缀<input value={prefix} onChange={event => { setPrefix(event.target.value); setSaved(''); }} disabled={(!!saving || choosingDirectory)} placeholder="例如 experiment/" spellCheck={false} /></label>}<div className="effective-prefix"><span>当前选择的有效前缀</span><code>{(mode === 'inherit' ? savedSettings.branchPrefix : nextPrefix) || '无前缀'}</code></div><div className="align-end"><button type="button" className="button secondary" onClick={() => void saveRepository()} disabled={(!!saving || choosingDirectory) || nextPrefix === repository?.branchPrefix || (mode === 'custom' && !prefix)}>{saving === 'repo' ? <Spinner label="正在保存" /> : '保存仓库前缀'}</button></div></div> : <p className="muted">导入仓库后，可在这里配置仓库专属前缀。</p>}</section>
+      <section className="settings-section"><div className="settings-section-heading"><h3>仓库分支前缀</h3></div>{repositories.length ? <div className="form-stack"><label className="field">仓库<select value={repoId} onChange={event => selectRepository(event.target.value)} disabled={(!!saving || choosingDirectory)}>{localRepos.map(repo => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select></label><div className="prefix-modes" role="group" aria-label="仓库前缀规则">{([{ id: 'inherit', title: '继承全局', text: savedSettings.branchPrefix || '无前缀' }, { id: 'empty', title: '清空前缀', text: '此仓库不加前缀' }, { id: 'custom', title: '自定义覆盖', text: '使用独立前缀' }] as const).map(item => <label key={item.id} className={`prefix-mode ${mode === item.id ? 'selected' : ''}`}><input type="radio" name="prefix-mode" value={item.id} checked={mode === item.id} onChange={() => { setMode(item.id); setSaved(''); }} disabled={(!!saving || choosingDirectory)} /><span><strong>{item.title}</strong><small>{item.text}</small></span></label>)}</div>{mode === 'custom' && <label className="field">仓库专属前缀<input value={prefix} onChange={event => { setPrefix(event.target.value); setSaved(''); }} disabled={(!!saving || choosingDirectory)} placeholder="例如 experiment/" spellCheck={false} /></label>}<div className="effective-prefix"><span>当前选择的有效前缀</span><code>{(mode === 'inherit' ? savedSettings.branchPrefix : nextPrefix) || '无前缀'}</code></div><div className="align-end"><button type="button" className="button secondary" onClick={() => void saveRepository()} disabled={(!!saving || choosingDirectory) || nextPrefix === repository?.branchPrefix || (mode === 'custom' && !prefix)}>{saving === 'repo' ? <Spinner label="正在保存" /> : '保存仓库前缀'}</button></div></div> : <p className="muted">导入仓库后，可在这里配置仓库专属前缀。</p>}</section>
       <ErrorNotice error={error} />{saved && <p className="saved-notice" role="status"><Icon name="check" size={16} />{saved}</p>}
     </div><div className="modal-footer"><span className="footer-hint">设置仅保存在本机</span><button type="button" className="button primary" onClick={onClose} disabled={(!!saving || choosingDirectory)}>完成</button></div>
   </Modal>;

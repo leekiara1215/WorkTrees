@@ -278,6 +278,7 @@ test('overlapping settings/repository writes and creates keep every successful m
   await Promise.all([
     f.service.updateSettings({ branchPrefix: 'batch/' }),
     f.service.updateSettings({ staleDays: 12 }),
+    f.service.updateSettings({ themeColor: 'blue' }),
     f.service.updateRepository(f.repo.id, { name: 'QA renamed repo' }),
   ]);
   const created = await Promise.all(['one', 'two', 'three'].map(name => f.service.createWorktree(f.input(name))));
@@ -285,6 +286,7 @@ test('overlapping settings/repository writes and creates keep every successful m
   const snapshot = await createWorktreeService({ dataDir: f.dataDir }).getSnapshot();
   assert.equal(snapshot.settings.branchPrefix, 'batch/');
   assert.equal(snapshot.settings.staleDays, 12);
+  assert.equal(snapshot.settings.themeColor, 'blue');
   assert.equal(snapshot.repositories[0]?.name, 'QA renamed repo');
   for (const item of created) assert(snapshot.worktrees.some(w => w.id === item.id && w.exists));
 });
@@ -316,6 +318,23 @@ test('settings and repository metadata round trip through JSON; removal leaves G
   await restored.removeRepository(f.repo.id);
   assert.equal((await createWorktreeService({ dataDir: f.dataDir }).getSnapshot()).repositories.length, 0);
   assert.equal(await git(f.repoPath, 'worktree', 'list', '--porcelain'), before);
+});
+
+test('theme defaults to green for older profiles and rejects unsupported updates', async t => {
+  const f = await fixture(t);
+  const file = path.join(f.dataDir, 'worktrees.json');
+  const profile = JSON.parse(await readFile(file, 'utf8'));
+  delete profile.settings.themeColor;
+  await writeFile(file, JSON.stringify(profile));
+
+  const service = createWorktreeService({ dataDir: f.dataDir });
+  const { settings } = await service.getSnapshot();
+  assert.equal(settings.themeColor, 'green');
+  assert.equal(settings.worktreeRoot, profile.settings.worktreeRoot);
+  assert.equal(settings.branchPrefix, profile.settings.branchPrefix);
+  await service.updateSettings({ themeColor: 'purple' });
+  await assert.rejects(service.updateSettings({ themeColor: 'unsupported' as never }), { code: 'INVALID_INPUT' });
+  assert.equal((await createWorktreeService({ dataDir: f.dataDir }).getSnapshot()).settings.themeColor, 'purple');
 });
 
 test('creation starts from the selected base branch rather than the source checkout', async t => {
