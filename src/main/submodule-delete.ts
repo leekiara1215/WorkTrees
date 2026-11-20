@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, readdir, realpath, unlink, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { SubmoduleDeleteOutcome, SubmoduleDeletePreview } from '../shared/types.js';
 import { isInside } from './delete-safety.js';
 import { git, gitRecords, parseWorktrees, ServiceError } from './git/client.js';
@@ -51,11 +51,6 @@ function safeChild(parent: string, child: string): string {
   if (!child || isAbsolute(child) || result === parent || !isInside(parent, result) || child.split(/[\\/]/).some(part => part === '..' || part.toLowerCase() === '.git')) refuse('子模块路径或名称不安全。', child);
   return result;
 }
-async function countFiles(cwd: string, args: string[]) {
-  let count = 0;
-  await gitRecords(cwd, args, () => { count++; });
-  return count;
-}
 export async function inspectCheckoutChanges(cwd: string, onHiddenIndex: () => never) {
   const index = createHash('sha256');
   const status = createHash('sha256');
@@ -67,29 +62,70 @@ export async function inspectCheckoutChanges(cwd: string, onHiddenIndex: () => n
     index.update(entry).update('\0');
   });
   let trackedChanges = 0;
+  let untrackedFiles = 0;
   let renameSource = false;
-  await gitRecords(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching', '--ignore-submodules=none'], entry => {
+  const changedPaths = new Map<string, boolean>();
+  await gitRecords(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=dirty'], entry => {
     status.update(entry).update('\0');
     if (renameSource) { renameSource = false; return; }
     const state = entry.toString('utf8', 0, 2);
     renameSource = /[RC]/.test(state);
+    const pathBytes = entry.subarray(3);
+    const path = pathBytes.toString('utf8');
+    if (!Buffer.from(path).equals(pathBytes)) throw new ServiceError('WORKTREE_UNSAFE', 'Git 返回了无法识别编码的文件路径。', cwd);
     // Child working directory/HEAD changes are covered by its own preview. A staged
     // gitlink change is still an uncommitted modification to the parent repository.
-    if (state !== '??' && state !== '!!' && !(state[0] === ' ' && nested.has(entry.toString('utf8', 3)))) trackedChanges++;
+    if (state === '??') untrackedFiles++;
+    else if (state[0] === ' ' && nested.has(path)) return;
+    else trackedChanges++;
+    changedPaths.set(path, state === '??');
   });
-  const untrackedFiles = await countFiles(cwd, ['ls-files', '--others', '--exclude-standard', '-z']);
-  const ignoredFiles = await countFiles(cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z']);
-  return { trackedChanges, untrackedFiles, ignoredFiles, indexSignature: index.digest('hex'), statusSignature: status.digest('hex') };
+
+  const checkedDirectories = new Set([cwd]);
+  let committedLinks: Map<string, string> | undefined;
+  for (const [path, untracked] of changedPaths) {
+    const absolute = resolve(cwd, path);
+    if (absolute === cwd || !isInside(cwd, absolute)) throw new ServiceError('WORKTREE_UNSAFE', 'Git 返回的改动路径不在 Worktree 内。', path);
+    const file = await lstat(absolute, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
+      throw error;
+    });
+    // Git can keep reporting the same status after another edit to a dirty file.
+    // Fingerprint only the paths Git reported. Directory timestamps include ignored changes.
+    const identity = file ? [file.dev, file.ino, file.mode] : [];
+    if (file && !file.isDirectory()) identity.push(file.size, file.mtimeNs, file.ctimeNs);
+    status.update(JSON.stringify([path, ...identity.map(String)])).update('\0');
+
+    if (!untracked) continue;
+    let directory = file?.isDirectory() ? absolute : dirname(absolute);
+    while (!checkedDirectories.has(directory)) {
+      checkedDirectories.add(directory);
+      const dotGit = join(directory, '.git');
+      if (await info(dotGit)) {
+        const modulePath = relative(cwd, directory).split(sep).join('/');
+        // A staged removal can make a committed gitlink appear untracked.
+        if (!nested.has(modulePath)) {
+          committedLinks ??= await tree(cwd, 'HEAD');
+          if (!committedLinks.has(modulePath)) throw new ServiceError('WORKTREE_UNSAFE', '目录内包含未验证的嵌套 Git 仓库，请先单独处理后再删除。', dotGit);
+        }
+      }
+      if (await info(join(directory, 'HEAD')) && await info(join(directory, 'config')) && await info(join(directory, 'objects')) && await info(join(directory, 'refs'))) {
+        throw new ServiceError('WORKTREE_UNSAFE', '目录内可能包含裸 Git 仓库，请先单独处理后再删除。', directory);
+      }
+      directory = dirname(directory);
+    }
+  }
+  return { trackedChanges, untrackedFiles, indexSignature: index.digest('hex'), statusSignature: status.digest('hex') };
 }
 export function hasSubmoduleFiles(module: SubmoduleDeletePreview) {
-  return module.trackedChanges + module.untrackedFiles + module.ignoredFiles > 0;
+  return module.trackedChanges + module.untrackedFiles > 0;
 }
 export interface InspectedSubmodule {
   preview: SubmoduleDeletePreview; source: string | null; gitDir: string | null; common: string | null; checkoutPath: string;
   refs: string; stashLog: string; objectFormat: string; signature: string; commonWillBeRemoved: boolean;
 }
 
-/** Inventory only registered gitlinks. Every nested .git must pass a repository identity check. */
+/** Inventory registered gitlinks and verify the identity of their Git repositories. */
 export async function inspectSubmodules(root: string, baseHead: string | null, missingAdmin?: string): Promise<InspectedSubmodule[]> {
   const modules: InspectedSubmodule[] = [];
   const rootAdmin = missingAdmin ?? await realpath((await git(root, ['rev-parse', '--absolute-git-dir'])).trim());
@@ -142,7 +178,7 @@ export async function inspectSubmodules(root: string, baseHead: string | null, m
       if (!source && await info(expectedAdmin)) source = expectedAdmin;
       let currentHead: string | null = null; let branch: string | null = null; let common: string | null = null; let gitDir: string | null = null;
       let refs = ''; let stashLog = ''; let objectFormat = 'sha1'; let changes: Awaited<ReturnType<typeof inspectCheckoutChanges>> | undefined; let identity = '';
-      let trackedChanges = 0; let untrackedFiles = 0; let ignoredFiles = 0;
+      let trackedChanges = 0; let untrackedFiles = 0;
       let ahead: number | null = null; let behind: number | null = null;
       let protectionReason: string | null = null;
       if (source) {
@@ -197,7 +233,7 @@ export async function inspectSubmodules(root: string, baseHead: string | null, m
         }
         if (dotInfo) {
           changes = await inspectCheckoutChanges(source, () => refuse('子模块存在 sparse/skip-worktree/assume-unchanged 标记，请先处理。', fullPath));
-          ({ trackedChanges, untrackedFiles, ignoredFiles } = changes);
+          ({ trackedChanges, untrackedFiles } = changes);
         }
         const base = bases.get(child) ?? null;
         if (base && await optional(source, ['cat-file', '-e', `${base}^{commit}`], !dotInfo) !== null) {
@@ -210,7 +246,7 @@ export async function inspectSubmodules(root: string, baseHead: string | null, m
       const preview: SubmoduleDeletePreview = {
         path: fullPath, branch, head: currentHead, baseHead: base,
         state: dotInfo ? 'ready' : source ? 'missing-worktree' : 'uninitialized',
-        comparison, ahead, behind, trackedChanges, untrackedFiles, ignoredFiles,
+        comparison, ahead, behind, trackedChanges, untrackedFiles,
         canDiscard: !!source && comparison !== 'same' && !protectionReason, protectionReason,
       };
       modules.push({ preview, source, gitDir, common, refs, stashLog, objectFormat, checkoutPath: absolute,

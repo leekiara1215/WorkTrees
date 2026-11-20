@@ -203,7 +203,7 @@ export function DeleteDialog({ worktree, onClose, onDeleted }: { worktree: Workt
   const key = JSON.stringify([worktree.id, deleteBranch, reload]);
   const currentPreview = preview?.key === key ? preview.data : null;
   const displayedBranch = currentPreview ? currentPreview.branch : worktree.branch;
-  const hasFiles = (module: SubmoduleDeletePreview) => module.trackedChanges + module.untrackedFiles + module.ignoredFiles > 0;
+  const hasFiles = (module: SubmoduleDeletePreview) => module.trackedChanges + module.untrackedFiles > 0;
   const canDelete = !worktree.isMain && !worktree.locked && !loading && !!currentPreview && (!currentPreview.requiresConfirmation || confirmed) && currentPreview.submodules.every(m => !hasFiles(m) || confirmSubmoduleFiles.includes(m.path));
   function toggleSelection(set: (update: (previous: string[]) => string[]) => void, path: string, checked: boolean) {
     set(previous => checked ? [...previous.filter(item => item !== path), path] : previous.filter(item => item !== path));
@@ -239,7 +239,7 @@ export function DeleteDialog({ worktree, onClose, onDeleted }: { worktree: Workt
       {displayedBranch ? <label className="delete-option"><input type="checkbox" checked={deleteBranch} onChange={event => { setDeleteBranch(event.target.checked); setConfirmed(false); setPreview(null); setOperationError(null); }} disabled={saving} /><span><strong>同时删除本地分支</strong><small>{deleteBranch ? '删除分支前，会检查其他分支和标签未包含的提交。' : '默认只删除工作目录，保留本地分支和已提交的代码。'}</small></span></label> : <p className="inline-hint">当前处于游离 HEAD，将检查是否有未被分支或标签保留的提交。</p>}
       {loading && <div className="dialog-loading"><Spinner label="正在检查修改与提交" /></div>}
       {currentPreview && <>
-        <div className="delete-checks" aria-live="polite"><div><span>已跟踪文件修改</span><strong>{currentPreview.trackedChanges}</strong></div><div><span>未跟踪文件</span><strong>{currentPreview.untrackedFiles}</strong></div><div><span>被忽略的文件</span><strong>{currentPreview.ignoredFiles}</strong></div><div><span>其他引用未包含的提交</span><strong>{currentPreview.uniqueCommits}</strong></div></div>
+        <div className="delete-checks" aria-live="polite"><div><span>已跟踪文件修改</span><strong>{currentPreview.trackedChanges}</strong></div><div><span>未跟踪文件</span><strong>{currentPreview.untrackedFiles}</strong></div><div><span>其他引用未包含的提交</span><strong>{currentPreview.uniqueCommits}</strong></div></div>
         {currentPreview.submodules.length > 0 && <section className="submodule-checks" aria-label="子模块删除检查">
           <div className="submodule-heading"><h3>子模块检查 · {currentPreview.submodules.length}</h3><p>比较基准：{currentPreview.baseBranch ?? '无可用基准'}{currentPreview.baseHead ? ` · ${currentPreview.baseHead.slice(0, 12)}` : ''}</p><p>默认保留分支及提交；保留成功后再删除目录。未提交文件需单独确认丢弃。</p></div>
           {currentPreview.submodules.map(module => <div className="submodule-check" key={module.path}>
@@ -252,13 +252,13 @@ export function DeleteDialog({ worktree, onClose, onDeleted }: { worktree: Workt
             </dl>
             {module.protectionReason && <p className="inline-hint">{module.protectionReason}</p>}
             {module.canDiscard && <label className="delete-option risk-confirmation"><input type="checkbox" checked={discardSubmodules.includes(module.path)} onChange={event => toggleSelection(setDiscardSubmodules, module.path, event.target.checked)} disabled={saving} /><span><strong>{module.branch ? `不保留此子模块分支 ${module.branch}` : '不保留此子模块的游离提交'}</strong><small>允许丢失此分支或游离 HEAD 的独有提交；其他分支和标签等引用仍会保留。不勾选时先保留，再删除目录。</small></span></label>}
-            {hasFiles(module) && <label className="delete-option risk-confirmation"><input type="checkbox" checked={confirmSubmoduleFiles.includes(module.path)} onChange={event => toggleSelection(setConfirmSubmoduleFiles, module.path, event.target.checked)} disabled={saving} /><span><strong>确认丢弃此子模块的本地文件修改</strong><small>已跟踪修改 {module.trackedChanges} 项、未跟踪文件 {module.untrackedFiles} 个、忽略文件 {module.ignoredFiles} 个。保留分支无法保存这些文件。</small></span></label>}
+            {hasFiles(module) && <label className="delete-option risk-confirmation"><input type="checkbox" checked={confirmSubmoduleFiles.includes(module.path)} onChange={event => toggleSelection(setConfirmSubmoduleFiles, module.path, event.target.checked)} disabled={saving} /><span><strong>确认丢弃此子模块的本地文件修改</strong><small>已跟踪修改 {module.trackedChanges} 项、未跟踪文件 {module.untrackedFiles} 个。保留分支无法保存这些文件。</small></span></label>}
           </div>)}
           <p className="submodule-summary">{currentPreview.submodules.filter(m => m.head).length - discardSubmodules.length} 个子模块保留当前分支或提交；{discardSubmodules.length} 个明确放弃保留。所有子模块工作目录将随 Worktree 删除。</p>
         </section>}
         {currentPreview.warnings.length > 0 && <ul className="warning-list">{currentPreview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}
-        <div className="safety-note delete-safety-note"><Icon name="alert" size={18} /><p>删除会移除上述目录及其中的文件。{currentPreview.deleteBranch ? '所选本地分支也会删除。' : currentPreview.branch ? '本地分支将保留。' : '游离 HEAD 没有对应的本地分支。'}此操作无法在应用内撤销。</p></div>
-        {currentPreview.requiresConfirmation && <label className="delete-option risk-confirmation"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} disabled={saving} /><span><strong>我已确认以上风险，并同意删除</strong><small>未提交、未跟踪及被忽略的文件可能永久丢失；删除分支或游离 HEAD 可能丢失独有提交。</small></span></label>}
+        <div className="safety-note delete-safety-note"><Icon name="alert" size={18} /><p>删除会移除上述目录及其中的文件，包括被 Git 忽略的文件。{currentPreview.deleteBranch ? '所选本地分支也会删除。' : currentPreview.branch ? '本地分支将保留。' : '游离 HEAD 没有对应的本地分支。'}此操作无法在应用内撤销。</p></div>
+        {currentPreview.requiresConfirmation && <label className="delete-option risk-confirmation"><input type="checkbox" checked={confirmed} onChange={event => setConfirmed(event.target.checked)} disabled={saving} /><span><strong>我已确认以上风险，并同意删除</strong><small>未提交的修改和未跟踪的文件可能永久丢失。删除分支或游离 HEAD 可能丢失独有提交。</small></span></label>}
       </>}
       <ErrorNotice error={operationError} />
       <ErrorNotice error={previewError} onRetry={refreshPreview} />

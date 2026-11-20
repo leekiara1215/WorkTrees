@@ -17,7 +17,7 @@ export interface CreatePreview { repoId: string; branch: string; baseBranch: str
 export interface RecoveryPreview { worktreeId: string; path: string; branch: string; baseBranch: string | null; branchExists: boolean; action: 'recreate-existing-branch' | 'recreate-from-base'; warnings: string[] }
 export interface DeletePreview {
   worktreeId: string; path: string; branch: string | null; head: string | null;
-  deleteBranch: boolean; trackedChanges: number; untrackedFiles: number; ignoredFiles: number;
+  deleteBranch: boolean; trackedChanges: number; untrackedFiles: number;
   uniqueCommits: number; requiresConfirmation: boolean; warnings: string[]; token: string;
   baseBranch: string | null; baseHead: string | null; submodules: SubmoduleDeletePreview[];
 }
@@ -25,7 +25,7 @@ export interface SubmoduleDeletePreview {
   path: string; branch: string | null; head: string | null; baseHead: string | null;
   state: 'ready' | 'uninitialized' | 'missing-worktree';
   comparison: 'same' | 'different' | 'unknown'; ahead: number | null; behind: number | null;
-  trackedChanges: number; untrackedFiles: number; ignoredFiles: number;
+  trackedChanges: number; untrackedFiles: number;
   canDiscard: boolean; protectionReason: string | null;
 }
 export interface SubmoduleDeleteOutcome {

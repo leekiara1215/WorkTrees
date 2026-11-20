@@ -34,7 +34,7 @@ test('delete preview is read-only; clean removal retains branch and clears manag
   assert.equal(preview.branch, created.branch);
   assert.equal(preview.deleteBranch, false);
   assert.equal(preview.requiresConfirmation, false);
-  assert.equal(preview.trackedChanges + preview.untrackedFiles + preview.ignoredFiles, 0);
+  assert.equal(preview.trackedChanges + preview.untrackedFiles, 0);
   assert(preview.token.length > 0);
   assert.equal(await git(f.repoPath, 'worktree', 'list', '--porcelain'), before);
   assert.equal(await readFile(path.join(created.path, 'README.md'), 'utf8'), 'QA fixture\n');
@@ -88,7 +88,7 @@ test('locked worktree cannot be previewed or deleted, and is never automatically
   assert.equal(await readFile(path.join(created.path, 'README.md'), 'utf8'), 'QA fixture\n');
 });
 
-test('tracked, untracked and ignored files are reported and require explicit risk confirmation', async t => {
+test('tracked edits and non-ignored untracked files require explicit risk confirmation', async t => {
   const f = await fixture(t);
   const created = await f.service.createWorktree(f.input('dirty'));
   await writeFile(path.join(created.path, '.gitignore'), 'cache/\n');
@@ -99,9 +99,8 @@ test('tracked, untracked and ignored files are reported and require explicit ris
   await mkdir(path.join(created.path, 'cache'));
   await writeFile(path.join(created.path, 'cache', 'important.bin'), 'ignored local data');
   const preview = await f.service.previewDelete(created.id, false);
-  assert(preview.trackedChanges >= 1);
-  assert(preview.untrackedFiles >= 1);
-  assert(preview.ignoredFiles >= 1);
+  assert.equal(preview.trackedChanges, 1);
+  assert.equal(preview.untrackedFiles, 1);
   assert(preview.requiresConfirmation);
   await assert.rejects(f.service.deleteWorktree(deletion(preview)), readableError);
   assert.equal(await readFile(path.join(created.path, 'cache', 'important.bin'), 'utf8'), 'ignored local data');
@@ -111,20 +110,23 @@ test('tracked, untracked and ignored files are reported and require explicit ris
   await git(f.repoPath, 'show-ref', '--verify', `refs/heads/${created.branch}`);
 });
 
-test('ignored-only local data needs confirmation even when Git otherwise considers checkout clean', async t => {
+test('ignored local data does not change a clean preview or require extra confirmation', async t => {
   const f = await fixture(t);
   const created = await f.service.createWorktree(f.input('ignored-only'));
-  await writeFile(path.join(created.path, '.gitignore'), 'local.secret\n');
+  await writeFile(path.join(created.path, '.gitignore'), 'cache/\n');
   await git(created.path, 'add', '.gitignore');
   await git(created.path, 'commit', '-m', 'Ignore local data');
-  await writeFile(path.join(created.path, 'local.secret'), 'must not vanish without confirmation');
+  const initial = await f.service.previewDelete(created.id, false);
+  await mkdir(path.join(created.path, 'cache'));
+  await writeFile(path.join(created.path, 'cache', 'artifact.bin'), 'ignored cache');
   assert.equal(await git(created.path, 'status', '--porcelain'), '');
   const preview = await f.service.previewDelete(created.id, false);
   assert.equal(preview.trackedChanges, 0);
   assert.equal(preview.untrackedFiles, 0);
-  assert(preview.ignoredFiles >= 1 && preview.requiresConfirmation);
-  await assert.rejects(f.service.deleteWorktree(deletion(preview)), readableError);
-  assert.equal(await readFile(path.join(created.path, 'local.secret'), 'utf8'), 'must not vanish without confirmation');
+  assert.equal(preview.requiresConfirmation, false);
+  assert.equal(preview.token, initial.token);
+  await f.service.deleteWorktree(deletion(initial));
+  await assert.rejects(access(created.path));
 });
 
 test('keeping a branch preserves unique commits without treating absence of upstream as data loss', async t => {
@@ -197,7 +199,7 @@ test('detached HEAD with unreferenced commit requires confirmation even when ret
   await assert.rejects(access(checkout));
 });
 
-test('detached worktree preview scans directory trees and indexes larger than 16 MiB', async t => {
+test('detached worktree preview reads Git trees and indexes larger than 16 MiB', async t => {
   const f = await fixture(t);
   const directory = Array(4).fill('folder-' + 'a'.repeat(180)).join('/');
   const blob = await git(f.repoPath, 'rev-parse', 'HEAD:README.md');
@@ -333,11 +335,17 @@ test('existing dirty content changing after preview invalidates risk confirmatio
   const f = await fixture(t);
   const created = await f.service.createWorktree(f.input('dirty-content-changed'));
   await writeFile(path.join(created.path, 'README.md'), 'first uncommitted edits\n');
+  const draft = path.join(created.path, 'draft.txt');
+  await writeFile(draft, 'first draft');
   const preview = await f.service.previewDelete(created.id, false);
   assert(preview.requiresConfirmation);
   await writeFile(path.join(created.path, 'README.md'), 'different and longer uncommitted edits\n');
-  await assert.rejects(f.service.deleteWorktree(deletion(preview, true)), readableError);
+  await assert.rejects(f.service.deleteWorktree(deletion(preview, true)), { code: 'DELETE_PREVIEW_STALE' });
   assert.equal(await readFile(path.join(created.path, 'README.md'), 'utf8'), 'different and longer uncommitted edits\n');
+  const updated = await f.service.previewDelete(created.id, false);
+  await writeFile(draft, 'second draft');
+  await assert.rejects(f.service.deleteWorktree(deletion(updated, true)), { code: 'DELETE_PREVIEW_STALE' });
+  assert.equal(await readFile(draft, 'utf8'), 'second draft');
 });
 
 test('registered missing directory can only be cleaned through a fresh preview of the exact entry', async t => {
@@ -392,6 +400,16 @@ test('nested Git repository blocks deletion without removing nested or parent da
   assert.equal(await git(nested, 'rev-parse', 'HEAD'), head);
   assert.equal(await readFile(path.join(nested, 'sentinel.txt'), 'utf8'), 'nested independent commit');
   assert.equal(await readFile(path.join(created.path, 'README.md'), 'utf8'), 'QA fixture\n');
+});
+
+test('a bare Git repository in untracked paths blocks deletion', async t => {
+  const f = await fixture(t);
+  const created = await f.service.createWorktree(f.input('nested-bare'));
+  const nested = path.join(created.path, 'repository.git');
+  await mkdir(nested);
+  await git(nested, 'init', '--bare');
+  await assert.rejects(f.service.previewDelete(created.id, false), { code: 'WORKTREE_UNSAFE' });
+  await access(path.join(nested, 'HEAD'));
 });
 
 test('index assume-unchanged flag cannot conceal edits during delete safety inspection', async t => {

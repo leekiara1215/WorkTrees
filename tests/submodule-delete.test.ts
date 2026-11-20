@@ -30,6 +30,8 @@ async function setup(t: TestContext, names = ['module']) {
 test('identical clean submodule permits deletion without discard confirmation and preserves independent Git data', async t => {
   const f = await setup(t);
   await git(f.module, 'switch', '-c', 'same-feature');
+  const exclude = await git(f.module, 'rev-parse', '--git-path', 'info/exclude');
+  await writeFile(path.resolve(f.module, exclude), 'cache.bin\n');
   const before = await git(f.module, 'for-each-ref');
   const preview = await f.service.previewDelete(f.created.id, false);
   assert.equal(preview.submodules[0]!.comparison, 'same');
@@ -37,6 +39,7 @@ test('identical clean submodule permits deletion without discard confirmation an
   assert.equal(preview.requiresConfirmation, false);
   assert.equal(preview.baseBranch, 'main');
   assert.equal(await git(f.module, 'for-each-ref'), before, 'preview is read-only');
+  await writeFile(path.join(f.module, 'cache.bin'), 'ignored cache added after preview');
   const outcome = await f.service.deleteWorktree({ ...deletion(preview), confirmRisks: false });
   await assert.rejects(access(f.created.path));
   const backup = outcome.submodules[0]!.backupPath!;
@@ -99,20 +102,16 @@ test('per-module discard drops only selected branch and retains other branches, 
   assert.notEqual(firstHead, f.base);
 });
 
-test('same commit with dirty, untracked and ignored files needs separate module confirmation', async t => {
+test('same commit with tracked edits and untracked files needs separate module confirmation', async t => {
   const f = await setup(t);
   await writeFile(path.join(f.module, 'module.txt'), 'uncommitted');
   await writeFile(path.join(f.module, 'draft.txt'), 'draft');
-  const exclude = (await git(f.module, 'rev-parse', '--git-path', 'info/exclude'));
-  await writeFile(path.resolve(f.module, exclude), 'cache.bin\n');
-  await writeFile(path.join(f.module, 'cache.bin'), 'cache');
   const preview = await f.service.previewDelete(f.created.id, false);
   const module = preview.submodules[0]!;
   assert.equal(module.comparison, 'same');
   assert.equal(module.canDiscard, false);
   assert.equal(module.trackedChanges, 1);
   assert.equal(module.untrackedFiles, 1);
-  assert.equal(module.ignoredFiles, 1);
   await assert.rejects(f.service.deleteWorktree(deletion(preview)), { code: 'SUBMODULE_CONFIRMATION_REQUIRED' });
   await f.service.deleteWorktree(deletion(preview, [], ['module']));
   await assert.rejects(access(f.created.path));
