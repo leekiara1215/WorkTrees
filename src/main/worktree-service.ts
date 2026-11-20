@@ -231,7 +231,8 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     if (samePath(path, mainPath) || samePath(path, await physicalPath(repo.path)) || entry.bare) fail('MAIN_WORKTREE', '主仓库不能通过 Worktree 删除操作移除。');
     if (entry.locked) fail('WORKTREE_LOCKED', 'Worktree 已锁定，请先检查锁定原因并在 Git 中手动处理。', entry.lockReason ?? entry.path);
     if (entry.path !== path) fail('WORKTREE_UNSAFE', 'Worktree 路径包含别名或符号链接，无法安全删除。', entry.path);
-    if (entries.some(other => other !== entry && isInside(path, other.path)) || data.repositories.some(other => isInside(path, other.path)) || isInside(path, await physicalPath(resolve(dataDir)))) fail('WORKTREE_UNSAFE', '此目录内包含其他仓库、Worktree 或应用数据，请先单独处理。', path);
+    const knownRepositories = [...data.repositories, ...(data.removedRepositories ?? [])];
+    if (entries.some(other => other !== entry && isInside(path, other.path)) || knownRepositories.some(other => isInside(path, other.path)) || isInside(path, await physicalPath(resolve(dataDir)))) fail('WORKTREE_UNSAFE', '此目录内包含其他仓库、Worktree 或应用数据，请先单独处理。', path);
     if (deleteBranch && !entry.branch) fail('INVALID_INPUT', '游离 HEAD 没有可删除的本地分支。');
     if (!entry.head || !/^[0-9a-f]{40,64}$/.test(entry.head)) fail('WORKTREE_UNSAFE', '无法确定 Worktree 的提交状态，已停止删除。');
     const identity = await inspectDeleteDirectory(repo.path, path, new Set(), false);
@@ -291,6 +292,12 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
       const canonical = await realpath(entries[0]?.path ?? checkout).catch(() => checkout);
       const existing = data.repositories.find(r => samePath(r.path, canonical));
       if (existing) return { ...existing };
+      const removedRepositories = data.removedRepositories ?? [];
+      const removed = removedRepositories.find(repo => samePath(repo.path, canonical));
+      if (removed) {
+        await save({ ...data, repositories: [...data.repositories, removed], removedRepositories: removedRepositories.filter(repo => repo.id !== removed.id) });
+        return { ...removed };
+      }
       const provisional: Repository = { id: randomUUID(), name: basename(canonical), path: canonical, defaultBranch: null, branchPrefix: null, addedAt: new Date().toISOString() };
       const refs = await branches(provisional);
       provisional.defaultBranch = refs.find(b => !b.remote && b.name === 'main')?.name ?? refs.find(b => !b.remote && b.name === 'master')?.name ?? refs.find(b => b.current)?.name ?? refs[0]?.name ?? null;
@@ -298,8 +305,8 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
       return { ...provisional };
     }),
     removeRepository: (repoId: string) => serial(async (): Promise<void> => {
-      repository(repoId);
-      await save({ ...data, repositories: data.repositories.filter(r => r.id !== repoId), managedWorktrees: data.managedWorktrees.filter(w => w.repoId !== repoId) });
+      const repo = repository(repoId);
+      await save({ ...data, repositories: data.repositories.filter(r => r.id !== repoId), removedRepositories: [...(data.removedRepositories ?? []), repo] });
     }),
     updateRepository: (repoId: string, patch: { name?: string; branchPrefix?: string | null }) => serial(async (): Promise<Repository> => {
       const repo = repository(repoId); plain(patch);

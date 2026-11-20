@@ -1,5 +1,4 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { THEME_COLORS, type ThemeColor } from '../shared/theme-colors';
 import type { AppError, Branch, CreatePreview, DeleteOutcome, DeletePreview, RecoveryPreview, Repository, Settings, SubmoduleDeletePreview, Worktree } from '../shared/types';
 import { appError, ErrorNotice, Icon, Modal, request, Spinner } from './ui';
 
@@ -11,17 +10,18 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
   const [branchesLoading, setBranchesLoading] = useState(false);
   const [branchError, setBranchError] = useState<AppError | null>(null);
   const [branchReload, setBranchReload] = useState(0);
-  const [preview, setPreview] = useState<{ key: string; data: CreatePreview } | null>(null);
-  const [previewing, setPreviewing] = useState(false);
-  const [error, setError] = useState<AppError | null>(null);
+  const [preview, setPreview] = useState<{ key: string; data: CreatePreview } | { key: string; error: AppError } | null>(null);
   const [saving, setSaving] = useState(false);
   const [previewReload, setPreviewReload] = useState(0);
   const branchNameId = useId();
   const busyRef = useRef(false);
+  const previewRequest = useRef<Promise<CreatePreview> | null>(null);
   const repo = repositories.find(item => item.id === repoId);
-  const key = JSON.stringify([repoId, baseBranch, branchName.trim()]);
-  const input = { repoId, baseBranch, branchName: branchName.trim() };
+  const name = branchName.trim();
+  const key = JSON.stringify([repoId, baseBranch, name, previewReload]);
+  const input = { repoId, baseBranch, branchName: name };
   const effectivePrefix = repo?.branchPrefix ?? settings.branchPrefix;
+  const canPreview = !!(repoId && baseBranch && name && !branchesLoading);
 
   useEffect(() => {
     let active = true;
@@ -36,135 +36,73 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
   }, [repoId, branchReload, repo?.defaultBranch]);
 
   useEffect(() => {
+    if (!canPreview) return;
     let active = true;
-    setPreview(null); setError(null); setPreviewing(false);
-    if (!repoId || !baseBranch || !branchName.trim()) return;
-    setPreviewing(true);
-    const timer = window.setTimeout(() => {
-      request(() => window.worktrees.previewCreate({ repoId, baseBranch, branchName: branchName.trim() })).then(data => { if (active) setPreview({ key, data }); }).catch(error => { if (active) setError(appError(error)); }).finally(() => { if (active) setPreviewing(false); });
-    }, 300);
+    const timer = window.setTimeout(async () => {
+      await previewRequest.current?.catch(() => undefined);
+      if (!active) return;
+      const pending = request(() => window.worktrees.previewCreate({ repoId, baseBranch, branchName: name }));
+      previewRequest.current = pending;
+      try {
+        const data = await pending;
+        if (active) setPreview({ key, data });
+      } catch (error) {
+        if (active) setPreview({ key, error: appError(error) });
+      } finally {
+        if (previewRequest.current === pending) previewRequest.current = null;
+      }
+    }, 500);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [repoId, baseBranch, branchName, key, previewReload]);
+  }, [repoId, baseBranch, name, key, canPreview]);
 
-  const currentPreview = preview?.key === key ? preview.data : null;
+  const result = canPreview && preview?.key === key ? preview : null;
+  const currentPreview = result && 'data' in result ? result.data : null;
+  const error = result && 'error' in result ? result.error : null;
+  const previewing = canPreview && !result;
+  function updateBranchName(value: string) {
+    if (value.trim() !== name) setPreview(null);
+    setBranchName(value);
+  }
   function generateBranchName() {
-    if (busyRef.current || branchesLoading || previewing) return;
+    if (busyRef.current || branchesLoading) return;
     const today = new Date();
     const date = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
     const suffix = crypto.randomUUID().replaceAll('-', '').slice(0, 6);
-    setBranchName(`work-${date}-${suffix}`);
+    updateBranchName(`work-${date}-${suffix}`);
   }
   async function create() {
-    if (busyRef.current || !currentPreview || previewing) return;
-    busyRef.current = true; setSaving(true); setError(null);
+    if (busyRef.current || !currentPreview) return;
+    busyRef.current = true; setSaving(true);
     try { const worktree = await request(() => window.worktrees.createWorktree(input)); onCreated(worktree); }
-    catch (error) { setError(appError(error)); setPreview(null); }
+    catch (error) { setPreview({ key, error: appError(error) }); }
     finally { busyRef.current = false; setSaving(false); }
   }
   return <Modal title="创建 Worktree" subtitle="从一个基准分支，开启独立的工作目录。" onClose={onClose} busy={saving}>
     <form onSubmit={event => { event.preventDefault(); void create(); }}>
       <div className="modal-body form-stack">
-        <label className="field">仓库<select value={repoId} onChange={event => setRepoId(event.target.value)} disabled={saving}>{repositories.map(repo => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select></label>
-        <label className="field">基准分支<select value={baseBranch} onChange={event => setBaseBranch(event.target.value)} disabled={saving || branchesLoading || !branches.length}><option value="" disabled>{branchesLoading ? '正在读取分支…' : '请选择基准分支'}</option>{branches.map(branch => <option value={branch.name} key={`${branch.remote ? 'remote' : 'local'}:${branch.name}`}>{branch.name}{branch.remote ? ' · 远程' : ''}{branch.current ? ' · 当前' : ''}</option>)}</select></label>
+        <label className="field">仓库<select value={repoId} onChange={event => { setRepoId(event.target.value); setBaseBranch(''); setBranchesLoading(true); setPreview(null); }} disabled={saving}>{repositories.map(repo => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select></label>
+        <label className="field">基准分支<select value={baseBranch} onChange={event => { setBaseBranch(event.target.value); setPreview(null); }} disabled={saving || branchesLoading || !branches.length}><option value="" disabled>{branchesLoading ? '正在读取分支…' : '请选择基准分支'}</option>{branches.map(branch => <option value={branch.name} key={`${branch.remote ? 'remote' : 'local'}:${branch.name}`}>{branch.name}{branch.remote ? ' · 远程' : ''}{branch.current ? ' · 当前' : ''}</option>)}</select></label>
         <ErrorNotice error={branchError} onRetry={() => setBranchReload(value => value + 1)} />
         {!branchesLoading && !branchError && branches.length === 0 && <p className="inline-hint">此仓库还没有可用分支。请先在仓库中创建首个提交，再重新读取分支。</p>}
-        <div className="field"><div className="field-heading"><label htmlFor={branchNameId}>分支名称</label><button type="button" className="auto-name-button" onClick={generateBranchName} disabled={saving || branchesLoading || previewing} title="生成不含前缀的日期与随机名称"><Icon name="refresh" size={12} />自动生成</button></div><div className="prefix-input">{effectivePrefix && <span title="当前有效分支前缀">{effectivePrefix}</span>}<input id={branchNameId} aria-describedby={`${branchNameId}-hint`} autoFocus value={branchName} onChange={event => setBranchName(event.target.value)} placeholder="例如 feature/new-design" disabled={saving} autoComplete="off" spellCheck={false} /></div><span className="field-hint" id={`${branchNameId}-hint`}>可手填或自动生成不含前缀的名称。完整分支与目录由下方预览确认。</span></div>
-        <div className={`preview-panel ${currentPreview ? 'ready' : ''}`} aria-live="polite"><div className="section-label"><Icon name="branch" size={16} />创建预览{previewing && <Spinner label="正在计算" />}</div>{currentPreview ? <><dl className="preview-values"><div><dt>完整分支</dt><dd>{currentPreview.branch}</dd></div><div><dt>基准分支</dt><dd>{currentPreview.baseBranch}</dd></div><div><dt>完整路径</dt><dd className="path-value">{currentPreview.path}</dd></div></dl>{currentPreview.warnings.length > 0 && <ul className="warning-list">{currentPreview.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul>}</> : <p className="muted">{previewing ? '正在校验名称与目标目录…' : '选择基准分支并输入名称后，预览完整分支与保存路径。'}</p>}</div>
-        <ErrorNotice error={error} onRetry={() => setPreviewReload(value => value + 1)} />
+        <div className="field"><div className="field-heading"><label htmlFor={branchNameId}>分支名称</label><button type="button" className="auto-name-button" onClick={generateBranchName} disabled={saving || branchesLoading} title="生成不含前缀的日期与随机名称"><Icon name="refresh" size={12} />自动生成</button></div><div className="prefix-input">{effectivePrefix && <span title="当前有效分支前缀">{effectivePrefix}</span>}<input id={branchNameId} aria-describedby={`${branchNameId}-hint`} autoFocus value={branchName} onChange={event => updateBranchName(event.target.value)} placeholder="例如 feature/new-design" disabled={saving} autoComplete="off" spellCheck={false} /></div><span className="field-hint" id={`${branchNameId}-hint`}>可手填或自动生成不含前缀的名称。完整分支与目录由下方预览确认。</span></div>
+        <section className="preview-panel create-preview ready" aria-labelledby={`${branchNameId}-preview`}>
+          <div className="section-label">
+            <Icon name="branch" size={16} /><span id={`${branchNameId}-preview`}>创建预览</span>
+            <span className="create-preview-status" role="status">{previewing ? <Spinner label="校验中" /> : currentPreview ? '校验通过' : error ? '校验失败' : '等待输入'}</span>
+          </div>
+          <div className="create-preview-content" tabIndex={0} aria-label="分支、路径和校验结果">
+            <dl className="preview-values">
+              <div><dt>完整分支</dt><dd>{currentPreview?.branch ?? (name ? effectivePrefix + name : '—')}</dd></div>
+              <div><dt>基准分支</dt><dd>{baseBranch || '—'}</dd></div>
+              <div><dt>完整路径</dt><dd className="path-value">{currentPreview?.path ?? '—'}</dd></div>
+            </dl>
+            {!!currentPreview?.warnings.length && <ul className="warning-list">{currentPreview.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>}
+            <ErrorNotice error={error} onRetry={() => setPreviewReload(value => value + 1)} />
+          </div>
+        </section>
       </div>
       <div className="modal-footer"><span className="footer-hint"><Icon name="folder" size={15} />独立目录，共享 Git 历史</span><div className="button-row"><button type="button" className="button secondary" onClick={onClose} disabled={saving}>取消</button><button type="submit" className="button primary" disabled={saving || previewing || branchesLoading || !currentPreview}>{saving ? <Spinner label="正在创建" /> : <><Icon name="plus" size={16} />确认创建</>}</button></div></div>
     </form>
-  </Modal>;
-}
-
-type PrefixMode = 'inherit' | 'empty' | 'custom';
-function prefixMode(repo?: Repository): PrefixMode { return repo?.branchPrefix === null || repo?.branchPrefix === undefined ? 'inherit' : repo.branchPrefix === '' ? 'empty' : 'custom'; }
-
-export function SettingsDialog({ settings, themeColor, onThemeChange, repositories, initialRepoId, onClose, onUpdated }: { settings: Settings; themeColor: ThemeColor; onThemeChange: (color: ThemeColor) => void; repositories: Repository[]; initialRepoId: string; onClose: () => void; onUpdated: () => void }) {
-  const [draft, setDraft] = useState(settings);
-  const [savedSettings, setSavedSettings] = useState(settings);
-  const [repoId, setRepoId] = useState(initialRepoId || repositories[0]?.id || '');
-  const [localRepos, setLocalRepos] = useState(repositories);
-  const repository = localRepos.find(repo => repo.id === repoId);
-  const [mode, setMode] = useState<PrefixMode>(prefixMode(repository));
-  const [prefix, setPrefix] = useState(repository?.branchPrefix ?? '');
-  const [saving, setSaving] = useState<'theme' | 'global' | 'repo' | null>(null);
-  const [choosingDirectory, setChoosingDirectory] = useState(false);
-  const rootPathId = useId();
-  const themeHeadingId = useId();
-  const [themeError, setThemeError] = useState<AppError | null>(null);
-  const [error, setError] = useState<AppError | null>(null);
-  const [saved, setSaved] = useState('');
-  const [days, setDays] = useState(String(settings.staleDays));
-  const busyRef = useRef(false);
-  const nextPrefix = mode === 'inherit' ? null : mode === 'empty' ? '' : prefix;
-  const busy = !!saving || choosingDirectory;
-  const globalChanged = draft.worktreeRoot !== savedSettings.worktreeRoot || draft.branchPrefix !== savedSettings.branchPrefix || days !== String(savedSettings.staleDays);
-  const daysValid = /^\d+$/.test(days) && Number(days) >= 1 && Number(days) <= 3650;
-  async function changeThemeColor(color: ThemeColor) {
-    if (busyRef.current || color === themeColor) return;
-    busyRef.current = true;
-    setSaving('theme');
-    setThemeError(null);
-    onThemeChange(color);
-    try { await request(() => window.worktrees.updateSettings({ themeColor: color })); }
-    catch (error) {
-      onThemeChange(themeColor);
-      setThemeError(appError(error));
-    } finally {
-      busyRef.current = false;
-      setSaving(null);
-    }
-  }
-  function selectRepository(id: string) {
-    const next = localRepos.find(repo => repo.id === id);
-    setRepoId(id); setMode(prefixMode(next)); setPrefix(next?.branchPrefix ?? ''); setError(null); setSaved('');
-  }
-  async function chooseRootDirectory() {
-    if (busyRef.current) return;
-    busyRef.current = true; setChoosingDirectory(true); setError(null);
-    try {
-      const path = await request(() => window.worktrees.chooseDirectory());
-      if (path !== null) { setDraft(current => ({ ...current, worktreeRoot: path })); setSaved(''); }
-    } catch (error) { setError(appError(error)); }
-    finally { busyRef.current = false; setChoosingDirectory(false); }
-  }
-  async function saveGlobal() {
-    if (busyRef.current || !daysValid || !draft.worktreeRoot.trim()) return;
-    busyRef.current = true; setSaving('global'); setError(null); setSaved('');
-    try { const data = await request(() => window.worktrees.updateSettings({ worktreeRoot: draft.worktreeRoot.trim(), branchPrefix: draft.branchPrefix, staleDays: Number(days) })); setDraft(data); setSavedSettings(data); setDays(String(data.staleDays)); setSaved('全局设置已保存'); onUpdated(); }
-    catch (error) { setError(appError(error)); }
-    finally { busyRef.current = false; setSaving(null); }
-  }
-  async function saveRepository() {
-    if (busyRef.current || !repository) return;
-    busyRef.current = true; setSaving('repo'); setError(null); setSaved('');
-    try { const data = await request(() => window.worktrees.updateRepository(repoId, { branchPrefix: nextPrefix })); setLocalRepos(items => items.map(item => item.id === data.id ? data : item)); setMode(prefixMode(data)); setPrefix(data.branchPrefix ?? ''); setSaved('仓库前缀已保存'); onUpdated(); }
-    catch (error) { setError(appError(error)); }
-    finally { busyRef.current = false; setSaving(null); }
-  }
-  return <Modal title="偏好设置" onClose={onClose} busy={busy} wide>
-    <div className="modal-body settings-body">
-      <section>
-        <div className="settings-section-heading"><h3 id={themeHeadingId}>主题色</h3></div>
-        <div className="theme-options" role="group" aria-labelledby={themeHeadingId}>
-          {THEME_COLORS.map(({ id, label }) => <button key={id} type="button" className="theme-option" data-color={id} aria-pressed={themeColor === id} aria-disabled={busy} onClick={() => void changeThemeColor(id)}>
-            <span className="theme-swatch">{themeColor === id && <Icon name="check" size={13} />}</span>
-            <span>{label}</span>
-          </button>)}
-        </div>
-        <ErrorNotice error={themeError} />
-      </section>
-      <section className="settings-section"><div className="settings-section-heading"><h3>全局默认</h3><span className="small-badge">新建时生效</span></div><div className="form-stack">
-        <div className="field"><label htmlFor={rootPathId}>Worktree 根路径</label><div className="directory-picker"><input id={rootPathId} value={draft.worktreeRoot} onChange={event => { setDraft({ ...draft, worktreeRoot: event.target.value }); setSaved(''); }} disabled={!!saving || choosingDirectory} spellCheck={false} placeholder="~/WorktreesLite" /><button type="button" className="button secondary directory-picker-button" onClick={() => void chooseRootDirectory()} disabled={!!saving || choosingDirectory}>{choosingDirectory ? <Spinner label="选择中" /> : <><Icon name="folder" size={15} />选择目录</>}</button></div><span className="field-hint">支持 <code>&lt;REPOSITORY_PATH&gt;</code> 与 <code>&lt;REPOSITORY_NAME&gt;</code>，创建时会展示展开后的完整路径。选择目录后请保存全局设置。</span></div>
-        <div className="form-columns"><label className="field">全局分支前缀<input value={draft.branchPrefix} onChange={event => { setDraft({ ...draft, branchPrefix: event.target.value }); setSaved(''); }} disabled={(!!saving || choosingDirectory)} placeholder="留空则不加前缀" spellCheck={false} /></label><label className="field">闲置天数<div className="suffix-input"><input type="number" min="1" max="3650" step="1" value={days} onChange={event => { setDays(event.target.value); setSaved(''); }} disabled={(!!saving || choosingDirectory)} /><span>天</span></div></label></div>
-        {!daysValid && <p className="validation-message">闲置天数请输入 1 至 3650 的整数。</p>}
-        <p className="field-hint">闲置状态根据最后活动时间判断。保存这些设置不会移动已有目录或重命名已有分支。</p>
-        <div className="align-end"><button className="button secondary" type="button" onClick={() => void saveGlobal()} disabled={(!!saving || choosingDirectory) || !globalChanged || !daysValid || !draft.worktreeRoot.trim()}>{saving === 'global' ? <Spinner label="正在保存" /> : '保存全局设置'}</button></div>
-      </div></section>
-      <section className="settings-section"><div className="settings-section-heading"><h3>仓库分支前缀</h3></div>{repositories.length ? <div className="form-stack"><label className="field">仓库<select value={repoId} onChange={event => selectRepository(event.target.value)} disabled={(!!saving || choosingDirectory)}>{localRepos.map(repo => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select></label><div className="prefix-modes" role="group" aria-label="仓库前缀规则">{([{ id: 'inherit', title: '继承全局', text: savedSettings.branchPrefix || '无前缀' }, { id: 'empty', title: '清空前缀', text: '此仓库不加前缀' }, { id: 'custom', title: '自定义覆盖', text: '使用独立前缀' }] as const).map(item => <label key={item.id} className={`prefix-mode ${mode === item.id ? 'selected' : ''}`}><input type="radio" name="prefix-mode" value={item.id} checked={mode === item.id} onChange={() => { setMode(item.id); setSaved(''); }} disabled={(!!saving || choosingDirectory)} /><span><strong>{item.title}</strong><small>{item.text}</small></span></label>)}</div>{mode === 'custom' && <label className="field">仓库专属前缀<input value={prefix} onChange={event => { setPrefix(event.target.value); setSaved(''); }} disabled={(!!saving || choosingDirectory)} placeholder="例如 experiment/" spellCheck={false} /></label>}<div className="effective-prefix"><span>当前选择的有效前缀</span><code>{(mode === 'inherit' ? savedSettings.branchPrefix : nextPrefix) || '无前缀'}</code></div><div className="align-end"><button type="button" className="button secondary" onClick={() => void saveRepository()} disabled={(!!saving || choosingDirectory) || nextPrefix === repository?.branchPrefix || (mode === 'custom' && !prefix)}>{saving === 'repo' ? <Spinner label="正在保存" /> : '保存仓库前缀'}</button></div></div> : <p className="muted">导入仓库后，可在这里配置仓库专属前缀。</p>}</section>
-      <ErrorNotice error={error} />{saved && <p className="saved-notice" role="status"><Icon name="check" size={16} />{saved}</p>}
-    </div><div className="modal-footer"><span className="footer-hint">设置仅保存在本机</span><button type="button" className="button primary" onClick={onClose} disabled={(!!saving || choosingDirectory)}>完成</button></div>
   </Modal>;
 }
 

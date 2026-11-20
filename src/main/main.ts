@@ -38,9 +38,42 @@ function requiredString(value: unknown, label: string): string {
 async function createWindow() {
   const window = new BrowserWindow({ width: 1320, height: 860, minWidth: 940, minHeight: 620, title: 'WorkTrees Lite', backgroundColor: '#f6f7f9', titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 20 }, webPreferences: { preload: join(import.meta.dirname, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true } });
   mainWindow = window;
-  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  window.webContents.on('will-navigate', (event, url) => { if (!validSender(url)) event.preventDefault(); });
-  window.on('closed', () => { if (mainWindow === window) mainWindow = null; });
+  const contents = window.webContents;
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  contents.on('will-navigate', (event, url) => { if (!validSender(url)) event.preventDefault(); });
+
+  let closeIntent: 'window' | 'app' | null = null;
+  let closeApproved = false;
+  function requestClose(event: { preventDefault(): void }, intent: 'window' | 'app') {
+    if (closeApproved || contents.isCrashed() || contents.isLoadingMainFrame() || !validSender(contents.getURL())) return;
+    event.preventDefault();
+    if (closeIntent) {
+      if (intent === 'app') closeIntent = intent;
+      return;
+    }
+    closeIntent = intent;
+    contents.send('worktrees:requestClose');
+  }
+  function finishClose(approved: boolean) {
+    const intent = closeIntent;
+    closeIntent = null;
+    if (!intent || !approved) return;
+    closeApproved = true;
+    if (intent === 'app') app.quit();
+    else window.close();
+  }
+  const beforeQuit = (event: { preventDefault(): void }) => requestClose(event, 'app');
+  app.on('before-quit', beforeQuit);
+  window.on('close', event => requestClose(event, 'window'));
+  contents.ipc.on('worktrees:closeDecision', (event, approved: unknown) => {
+    if (event.senderFrame === contents.mainFrame && validSender(event.senderFrame.url)) finishClose(approved === true);
+  });
+  contents.on('did-start-loading', () => { closeIntent = null; });
+  contents.on('render-process-gone', () => finishClose(true));
+  window.on('closed', () => {
+    app.off('before-quit', beforeQuit);
+    if (mainWindow === window) mainWindow = null;
+  });
   if (developmentUrl) await window.loadURL(developmentUrl); else await window.loadFile(fileURLToPath(new URL('../../dist/index.html', import.meta.url)));
 }
 

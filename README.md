@@ -2,11 +2,11 @@
 
 一个本地 Git Worktree 桌面管理器，支持创建、目录/命名配置、列表/搜索/筛选、异常识别、重建与安全删除。交互参考本机 Kepler，代码独立实现。
 
-当前正式版本为 **v1.0.0**，最新预发行版为 **v1.1.1**。参见 [发布记录](CHANGELOG.md)。
+当前正式版本为 **v1.2.0**。参见 [发布记录](CHANGELOG.md)。
 
 ## 下载
 
-从 [v1.1.1 发布页](https://github.com/leekiara1215/WorkTrees/releases/tag/v1.1.1) 下载 macOS Apple Silicon（arm64）DMG，打开后把 `WorkTrees Lite.app` 拖入「应用程序」。[v1.0.0 应用压缩包](https://github.com/leekiara1215/WorkTrees/releases/tag/v1.0.0) 仍可下载。使用应用需要本机已安装 Git。
+从 [v1.2.0 发布页](https://github.com/leekiara1215/WorkTrees/releases/tag/v1.2.0) 下载 macOS Apple Silicon（arm64）DMG，打开后把 `WorkTrees Lite.app` 拖入「应用程序」。[v1.0.0 应用压缩包](https://github.com/leekiara1215/WorkTrees/releases/tag/v1.0.0) 仍可下载。使用应用需要本机已安装 Git。
 
 v1.1.1 起的 macOS 内部测试构建使用完整 ad-hoc 签名并校验嵌套代码及资源完整性；没有 Developer ID 身份签名或 Apple 公证，不保证下载后自动通过 Gatekeeper。接收人首次打开时，确认来源可信后可按 [Apple 官方说明](https://support.apple.com/zh-cn/102445)，在“系统设置 → 隐私与安全性”中选择“仍要打开”。旧 v1.1.0 包存在 Electron 残留签名无效的问题，请改发新版内部测试包。Windows、Linux、Intel Mac 暂未验收。
 
@@ -50,7 +50,7 @@ v1.0.0 的 macOS Apple Silicon 应用路径：`release/v1.0.0/WorkTrees Lite-dar
 2. 点击新建 Worktree，选基准分支、填写分支名；也可点击“自动生成”获取名称。
 3. 查看完整分支名和目录预览，确认创建。
 4. 在列表中按仓库、分支/路径文字、状态筛选，随时刷新磁盘状态。
-5. 在设置中调整 Worktree 根目录、全局前缀、闲置阈值；仓库可以继承或覆盖分支前缀。
+5. 在「偏好设置」中调整 Worktree 根目录、全局前缀和闲置阈值，修改会自动保存。每个仓库有独立一行，可选择继承全局、不使用前缀或自定义前缀，也可从列表移除。重新导入同一路径会恢复已保存的仓库设置和 Worktree 记录。
 6. 应用创建的 Worktree 如果目录丢失，可查看重建预览，再确认恢复到记录中的路径。分支不存在时会明确显示从基准重建。
 7. 在「偏好设置 → 主题色」点选配色，界面立即换色并自动保存选择。
 

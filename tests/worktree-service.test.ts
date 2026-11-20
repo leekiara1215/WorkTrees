@@ -301,10 +301,13 @@ test('racing duplicate creates yield one checkout and one readable rejection', a
   assert.equal((await f.service.getSnapshot()).worktrees.filter(w => w.managed).length, 1);
 });
 
-test('settings and repository metadata round trip through JSON; removal leaves Git untouched', async t => {
+test('removal preserves Git and restores settings and Worktree records on re-import', async t => {
   const f = await fixture(t);
   await f.service.updateSettings({ branchPrefix: 'persist/', staleDays: 9 });
   await f.service.updateRepository(f.repo.id, { name: '持久化 仓库', branchPrefix: '' });
+  const existingTree = await f.service.createWorktree(f.input('existing'));
+  const missingTree = await f.service.createWorktree(f.input('missing'));
+  await git(f.repoPath, 'worktree', 'remove', missingTree.path);
   const restored = createWorktreeService({ dataDir: f.dataDir });
   const snapshot = await restored.getSnapshot();
   assert.equal(snapshot.settings.branchPrefix, 'persist/');
@@ -316,8 +319,19 @@ test('settings and repository metadata round trip through JSON; removal leaves G
   for (const name of jsonFiles) JSON.parse(await readFile(path.join(f.dataDir, name), 'utf8'));
   const before = await git(f.repoPath, 'worktree', 'list', '--porcelain');
   await restored.removeRepository(f.repo.id);
-  assert.equal((await createWorktreeService({ dataDir: f.dataDir }).getSnapshot()).repositories.length, 0);
+  const restarted = createWorktreeService({ dataDir: f.dataDir });
+  const hidden = await restarted.getSnapshot();
+  assert.deepEqual(hidden.repositories, []);
+  assert.deepEqual(hidden.worktrees, []);
+  await assert.rejects(restarted.previewRecovery(missingTree.id), { code: 'REPOSITORY_NOT_FOUND' });
   assert.equal(await git(f.repoPath, 'worktree', 'list', '--porcelain'), before);
+  await access(existingTree.path);
+  const reimported = await restarted.addRepository(existingTree.path);
+  assert.deepEqual(reimported, snapshot.repositories[0]);
+  const active = await restarted.getSnapshot();
+  assert(active.worktrees.some(tree => tree.id === existingTree.id && tree.managed && tree.exists));
+  assert(active.worktrees.some(tree => tree.id === missingTree.id && tree.managed && !tree.exists));
+  assert.equal((await restarted.previewRecovery(missingTree.id)).path, missingTree.path);
 });
 
 test('theme defaults to green for older profiles and rejects unsupported updates', async t => {

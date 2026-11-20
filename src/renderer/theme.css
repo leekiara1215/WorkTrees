@@ -94,7 +94,3 @@
   color: white;
   background: var(--theme-color);
 }
-
-.theme-options + .error-notice {
-  margin-top: 12px;
-}

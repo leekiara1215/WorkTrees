@@ -11,9 +11,17 @@ export interface ManagedWorktree {
 }
 export interface StoreData {
   version: 1; settings: Settings; repositories: Repository[]; managedWorktrees: ManagedWorktree[];
+  removedRepositories?: Repository[];
 }
 
 export const defaultSettings = (): Settings => ({ worktreeRoot: join(homedir(), 'WorktreesLite'), branchPrefix: 'wt/', staleDays: 14, themeColor: DEFAULT_THEME_COLOR });
+
+function validRepositories(repositories: Repository[]) {
+  return Array.isArray(repositories) && repositories.every(repo => repo
+    && [repo.id, repo.path, repo.name, repo.addedAt].every(value => typeof value === 'string')
+    && (repo.branchPrefix === null || typeof repo.branchPrefix === 'string')
+    && (repo.defaultBranch === null || typeof repo.defaultBranch === 'string'));
+}
 
 export function createStore(dataDir: string) {
   const file = join(dataDir, 'worktrees.json');
@@ -27,11 +35,10 @@ export function createStore(dataDir: string) {
       }
       try {
         const data = JSON.parse(raw) as StoreData;
-        if (data.version !== 1 || !data.settings || !Array.isArray(data.repositories) || !Array.isArray(data.managedWorktrees)
+        if (data.version !== 1 || !data.settings || !validRepositories(data.repositories) || !Array.isArray(data.managedWorktrees)
+          || (data.removedRepositories !== undefined && !validRepositories(data.removedRepositories))
           || typeof data.settings.worktreeRoot !== 'string' || typeof data.settings.branchPrefix !== 'string'
           || !Number.isInteger(data.settings.staleDays) || data.settings.staleDays < 1
-          || data.repositories.some(r => !r || !['id', 'path', 'name', 'addedAt'].every(k => typeof (r as unknown as Record<string, unknown>)[k] === 'string')
-            || !(r.branchPrefix === null || typeof r.branchPrefix === 'string') || !(r.defaultBranch === null || typeof r.defaultBranch === 'string'))
           || data.managedWorktrees.some(w => !w || !['id', 'repoId', 'path', 'branch', 'baseBranch', 'createdAt'].every(k => typeof (w as unknown as Record<string, unknown>)[k] === 'string'))) {
           throw new Error('Unsupported or invalid data schema');
         }

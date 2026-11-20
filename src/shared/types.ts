@@ -34,6 +34,7 @@ export interface SubmoduleDeleteOutcome {
 export interface DeleteInput { worktreeId: string; deleteBranch: boolean; token: string; confirmRisks: boolean; discardSubmodules?: string[]; confirmSubmoduleFiles?: string[] }
 export interface DeleteOutcome { worktreeId: string; path: string; branch: string | null; branchDeleted: boolean; warnings: string[]; submodules: SubmoduleDeleteOutcome[] }
 export interface AppApi {
+  onCloseRequested(approve: () => Promise<boolean>): () => void;
   getSnapshot(): Promise<Result<Snapshot>>;
   chooseDirectory(): Promise<Result<string | null>>;
   addRepository(path: string): Promise<Result<Repository>>;

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_THEME_COLOR, type ThemeColor } from '../shared/theme-colors';
 import type { AppError, DeleteOutcome, Repository, Snapshot, Worktree } from '../shared/types';
-import { CreateDialog, DeleteDialog, RecoveryDialog, SettingsDialog } from './dialogs';
+import { CreateDialog, DeleteDialog, RecoveryDialog } from './dialogs';
+import { SettingsDialog } from './SettingsDialog';
 import { appError, ErrorNotice, Icon, request, Spinner } from './ui';
 
 type Filter = 'all' | 'stale' | 'missing' | 'locked' | 'error';
@@ -133,7 +134,7 @@ export default function App() {
     </div>
     {toast && <div className="toast" role="status"><Icon name="check" size={17} />{toast}<button type="button" className="icon-button" aria-label="关闭提示" onClick={() => setToast('')}><Icon name="close" size={14} /></button></div>}
     {dialog?.kind === 'create' && snapshot && <CreateDialog repositories={repositories} settings={snapshot.settings} initialRepoId={repoId} onClose={() => setDialog(null)} onCreated={worktree => completed(worktree)} />}
-    {dialog?.kind === 'settings' && snapshot && <SettingsDialog settings={snapshot.settings} themeColor={themeColor} onThemeChange={setThemeColor} repositories={repositories} initialRepoId={repoId} onClose={() => setDialog(null)} onUpdated={() => void refresh()} />}
+    {dialog?.kind === 'settings' && snapshot && <SettingsDialog settings={snapshot.settings} themeColor={themeColor} onThemeChange={setThemeColor} repositories={repositories} onClose={changed => { setDialog(null); if (changed) void refresh(); }} onRepositoryRemoved={() => void refresh()} />}
     {dialog?.kind === 'delete' && <DeleteDialog worktree={dialog.worktree} onClose={() => setDialog(null)} onDeleted={deleted} />}
     {dialog?.kind === 'recovery' && <RecoveryDialog worktree={dialog.worktree} onClose={() => setDialog(null)} onRecovered={worktree => completed(worktree, true)} />}
   </>;

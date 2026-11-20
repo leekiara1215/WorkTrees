@@ -1,6 +1,21 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { AppApi } from '../shared/types.js';
+
+let closeGuard: (() => Promise<boolean>) | null = null;
+ipcRenderer.on('worktrees:requestClose', async () => {
+  try {
+    const approved = closeGuard ? await closeGuard() : true;
+    ipcRenderer.send('worktrees:closeDecision', approved);
+  } catch {
+    ipcRenderer.send('worktrees:closeDecision', false);
+  }
+});
+
 const api: AppApi = {
+  onCloseRequested: (approve) => {
+    closeGuard = approve;
+    return () => { if (closeGuard === approve) closeGuard = null; };
+  },
   getSnapshot: () => ipcRenderer.invoke('worktrees:getSnapshot'),
   chooseDirectory: () => ipcRenderer.invoke('worktrees:chooseDirectory'),
   addRepository: (path) => ipcRenderer.invoke('worktrees:addRepository', path),
