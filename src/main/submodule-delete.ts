@@ -3,34 +3,40 @@ import { lstat, mkdir, readFile, readdir, realpath, unlink, writeFile } from 'no
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import type { SubmoduleDeleteOutcome, SubmoduleDeletePreview } from '../shared/types.js';
 import { isInside } from './delete-safety.js';
-import { git, parseWorktrees, ServiceError } from './git/client.js';
+import { git, gitRecords, parseWorktrees, ServiceError } from './git/client.js';
 
 const refuse = (message: string, details?: string): never => { throw new ServiceError('SUBMODULE_UNSAFE', message, details); };
 async function info(path: string) {
   try { return await lstat(path); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
 }
+function metadataArgs(directory: string, args: string[]) {
+  return ['--git-dir', directory, '--work-tree', directory, ...args];
+}
 function metadataGit(directory: string, args: string[]) {
-  return git(directory, ['--git-dir', directory, '--work-tree', directory, ...args]);
+  return git(directory, metadataArgs(directory, args));
 }
 async function optional(cwd: string, args: string[], metadata = false) {
   try { return (await (metadata ? metadataGit(cwd, args) : git(cwd, args))).trim(); }
   catch (error) { if (error instanceof ServiceError && error.code === 'GIT_ERROR') return null; throw error; }
 }
 
-function gitlinks(output: string): Map<string, string> {
+function addGitlink(result: Map<string, string>, entry: Buffer, start = 0) {
+  if (entry.toString('utf8', start, start + 7) !== '160000 ') return;
+  const tab = entry.indexOf('\t', start);
+  const [, second, third] = entry.toString('utf8', start, tab).split(' ');
+  if (third !== '0' && second !== 'commit') refuse('子模块索引存在冲突，请先解决冲突。');
+  result.set(entry.toString('utf8', tab + 1), second === 'commit' ? third! : second!);
+}
+async function gitlinks(cwd: string, args: string[]): Promise<Map<string, string>> {
   const result = new Map<string, string>();
-  for (const entry of output.split('\0').filter(Boolean)) {
-    const tab = entry.indexOf('\t');
-    const [mode, second, third] = entry.slice(0, tab).split(' ');
-    if (mode !== '160000') continue;
-    if (third !== '0' && second !== 'commit') refuse('子模块索引存在冲突，请先解决冲突。');
-    result.set(entry.slice(tab + 1), second === 'commit' ? third! : second!);
-  }
+  await gitRecords(cwd, args, entry => addGitlink(result, entry));
   return result;
 }
 async function tree(cwd: string, commit: string | null, metadata = false) {
-  return commit ? gitlinks(await (metadata ? metadataGit(cwd, ['ls-tree', '-rz', '--full-tree', commit]) : git(cwd, ['ls-tree', '-rz', '--full-tree', commit]))) : new Map<string, string>();
+  if (!commit) return new Map<string, string>();
+  const args = ['ls-tree', '-rz', '--full-tree', commit];
+  return gitlinks(cwd, metadata ? metadataArgs(cwd, args) : args);
 }
 async function submoduleWorktrees(admin: string, common: string, checkoutPath?: string) {
   // Git reports a submodule's common directory as its main worktree path on some versions.
@@ -45,20 +51,35 @@ function safeChild(parent: string, child: string): string {
   if (!child || isAbsolute(child) || result === parent || !isInside(parent, result) || child.split(/[\\/]/).some(part => part === '..' || part.toLowerCase() === '.git')) refuse('子模块路径或名称不安全。', child);
   return result;
 }
-function count(output: string) { return output.split('\0').filter(Boolean).length; }
-export function trackedFileChanges(status: string, index: string) {
-  const nested = gitlinks(index);
-  const parts = status.split('\0').filter(Boolean);
-  let changes = 0;
-  for (let i = 0; i < parts.length; i++) {
-    const state = parts[i]!.slice(0, 2);
-    const path = parts[i]!.slice(3);
+async function countFiles(cwd: string, args: string[]) {
+  let count = 0;
+  await gitRecords(cwd, args, () => { count++; });
+  return count;
+}
+export async function inspectCheckoutChanges(cwd: string, onHiddenIndex: () => never) {
+  const index = createHash('sha256');
+  const status = createHash('sha256');
+  const nested = new Map<string, string>();
+  await gitRecords(cwd, ['ls-files', '--stage', '-v', '-z'], entry => {
+    const flag = entry.toString('utf8', 0, 1);
+    if (/[Sa-z]/.test(flag)) onHiddenIndex();
+    addGitlink(nested, entry, 2); // The -v flag is followed by a space.
+    index.update(entry).update('\0');
+  });
+  let trackedChanges = 0;
+  let renameSource = false;
+  await gitRecords(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching', '--ignore-submodules=none'], entry => {
+    status.update(entry).update('\0');
+    if (renameSource) { renameSource = false; return; }
+    const state = entry.toString('utf8', 0, 2);
+    renameSource = /[RC]/.test(state);
     // Child working directory/HEAD changes are covered by its own preview. A staged
     // gitlink change is still an uncommitted modification to the parent repository.
-    if (state !== '??' && state !== '!!' && !(state[0] === ' ' && nested.has(path))) changes++;
-    if (/[RC]/.test(state)) i++;
-  }
-  return changes;
+    if (state !== '??' && state !== '!!' && !(state[0] === ' ' && nested.has(entry.toString('utf8', 3)))) trackedChanges++;
+  });
+  const untrackedFiles = await countFiles(cwd, ['ls-files', '--others', '--exclude-standard', '-z']);
+  const ignoredFiles = await countFiles(cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z']);
+  return { trackedChanges, untrackedFiles, ignoredFiles, indexSignature: index.digest('hex'), statusSignature: status.digest('hex') };
 }
 export function hasSubmoduleFiles(module: SubmoduleDeletePreview) {
   return module.trackedChanges + module.untrackedFiles + module.ignoredFiles > 0;
@@ -79,7 +100,7 @@ export async function inspectSubmodules(root: string, baseHead: string | null, m
     const head = (await run(['rev-parse', '--verify', 'HEAD'])).trim();
     const links = await tree(parent, head, !checkout);
     if (checkout) {
-      const staged = gitlinks(await git(parent, ['ls-files', '--stage', '-z']));
+      const staged = await gitlinks(parent, ['ls-files', '--stage', '-z']);
       for (const [path, oid] of staged) links.set(path, oid);
     }
     if (!links.size) return;
@@ -120,7 +141,7 @@ export async function inspectSubmodules(root: string, baseHead: string | null, m
       let source: string | null = dotInfo ? absolute : null;
       if (!source && await info(expectedAdmin)) source = expectedAdmin;
       let currentHead: string | null = null; let branch: string | null = null; let common: string | null = null; let gitDir: string | null = null;
-      let refs = ''; let stashLog = ''; let objectFormat = 'sha1'; let status = ''; let index = ''; let flags = ''; let identity = '';
+      let refs = ''; let stashLog = ''; let objectFormat = 'sha1'; let changes: Awaited<ReturnType<typeof inspectCheckoutChanges>> | undefined; let identity = '';
       let trackedChanges = 0; let untrackedFiles = 0; let ignoredFiles = 0;
       let ahead: number | null = null; let behind: number | null = null;
       let protectionReason: string | null = null;
@@ -175,13 +196,8 @@ export async function inspectSubmodules(root: string, baseHead: string | null, m
           if (await info(join(admin, marker))) refuse('子模块正在合并、变基或拣选提交，请完成后再删除。', fullPath);
         }
         if (dotInfo) {
-          flags = await git(source, ['ls-files', '-v', '-z']);
-          if (flags.split('\0').some(line => line[0] === 'S' || /^[a-z]/.test(line))) refuse('子模块存在 sparse/skip-worktree/assume-unchanged 标记，请先处理。', fullPath);
-          index = await git(source, ['ls-files', '--stage', '-z']);
-          status = await git(source, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching', '--ignore-submodules=none']);
-          trackedChanges = trackedFileChanges(status, index);
-          untrackedFiles = count(await git(source, ['ls-files', '--others', '--exclude-standard', '-z']));
-          ignoredFiles = count(await git(source, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z']));
+          changes = await inspectCheckoutChanges(source, () => refuse('子模块存在 sparse/skip-worktree/assume-unchanged 标记，请先处理。', fullPath));
+          ({ trackedChanges, untrackedFiles, ignoredFiles } = changes);
         }
         const base = bases.get(child) ?? null;
         if (base && await optional(source, ['cat-file', '-e', `${base}^{commit}`], !dotInfo) !== null) {
@@ -199,7 +215,7 @@ export async function inspectSubmodules(root: string, baseHead: string | null, m
       };
       modules.push({ preview, source, gitDir, common, refs, stashLog, objectFormat, checkoutPath: absolute,
         commonWillBeRemoved: !!common && (isInside(root, common) || isInside(rootAdmin, common)),
-        signature: createHash('sha256').update(JSON.stringify({ preview, registeredHead, refs, stashLog, objectFormat, status, index, flags, identity, config })).digest('hex') });
+        signature: createHash('sha256').update(JSON.stringify({ preview, registeredHead, refs, stashLog, objectFormat, changes, identity, config })).digest('hex') });
       if (source) await visit(source, dotInfo ? absolute : null, fullPath, ahead !== null ? base : null, depth + 1);
     }
   }

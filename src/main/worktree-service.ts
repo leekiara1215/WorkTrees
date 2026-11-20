@@ -7,7 +7,7 @@ import type { AppError, Branch, CreateInput, CreatePreview, DeleteInput, DeleteO
 import { checkCheckoutCancellation, checkoutGit, git, listGitWorktrees, ServiceError, type GitWorktree } from './git/client.js';
 import { createStore, type ManagedWorktree, type StoreData } from './storage/store.js';
 import { inspectDeleteDirectory, isInside } from './delete-safety.js';
-import { completeSubmoduleRemoval, hasSubmoduleFiles, inspectSubmodules, preserveSubmodules, trackedFileChanges } from './submodule-delete.js';
+import { completeSubmoduleRemoval, hasSubmoduleFiles, inspectCheckoutChanges, inspectSubmodules, preserveSubmodules } from './submodule-delete.js';
 
 function fail(code: string, message: string, details?: string): never { throw new ServiceError(code, message, details); }
 function text(value: unknown, label: string, max = 1024): string {
@@ -293,18 +293,13 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     }
     const modules = await inspectSubmodules(path, baseHead, identity.exists ? undefined : identity.gitDir);
     const directory = identity.exists ? await inspectDeleteDirectory(repo.path, path, new Set(modules.filter(m => m.preview.state === 'ready').map(m => resolve(path, m.preview.path)))) : identity;
-    let status = ''; let index = ''; let trackedChanges = 0; let untrackedFiles = 0; let ignoredFiles = 0;
+    let changes: Awaited<ReturnType<typeof inspectCheckoutChanges>> | undefined;
     if (directory.exists) {
-      const trackedFlags = (await git(path, ['ls-files', '-v', '-z'])).split('\0').filter(Boolean);
-      if (trackedFlags.some(line => line[0] === 'S' || /^[a-z]/.test(line))) fail('WORKTREE_UNSAFE', '此 Worktree 存在隐藏文件状态的索引标记，请先处理 sparse/skip-worktree/assume-unchanged 后再删除。');
-      index = await git(path, ['ls-files', '--stage', '-z']);
-      status = await git(path, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching', '--ignore-submodules=none']);
-      trackedChanges = trackedFileChanges(status, index);
-      untrackedFiles = (await git(path, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean).length;
-      ignoredFiles = (await git(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])).split('\0').filter(Boolean).length;
+      changes = await inspectCheckoutChanges(path, () => fail('WORKTREE_UNSAFE', '此 Worktree 存在隐藏文件状态的索引标记，请先处理 sparse/skip-worktree/assume-unchanged 后再删除。'));
       const currentHead = (await git(path, ['rev-parse', '--verify', 'HEAD'])).trim();
       if (currentHead !== entry.head) fail('DELETE_PREVIEW_STALE', 'Worktree 状态正在变化，请重新检查后再删除。');
     }
+    const { trackedChanges = 0, untrackedFiles = 0, ignoredFiles = 0 } = changes ?? {};
     const refs = await git(repo.path, ['for-each-ref', '--format=%(refname)%00%(objectname)%00%(symref)', 'refs/heads/', 'refs/remotes/', 'refs/tags/']);
     const otherRefs = refs.split('\n').filter(Boolean).map(line => line.split('\0')[0]!).filter(ref => ref !== `refs/heads/${entry.branch}`);
     if (otherRefs.length > 10_000 || otherRefs.join('').length > 100_000) fail('WORKTREE_UNSAFE', '仓库引用过多，无法完成提交保留检查。');
@@ -321,7 +316,7 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     if (uniqueCommits > 0) warnings.push(deleteBranch || !entry.branch ? `${uniqueCommits} 个提交未被其他分支或标签保留；删除后可能无法找回。` : `${uniqueCommits} 个独有提交仍由分支 ${entry.branch} 保留。`);
     warnings.push(deleteBranch ? `同时删除本地分支 ${entry.branch}，不会修改远程仓库。` : entry.branch ? `保留本地分支 ${entry.branch} 及其提交。` : '此目录处于游离 HEAD 状态。');
     const payload = { worktreeId, path, branch: entry.branch, head: entry.head, deleteBranch, trackedChanges, untrackedFiles, ignoredFiles, uniqueCommits, requiresConfirmation, warnings, baseBranch, baseHead, submodules: modules.map(m => m.preview) };
-    const token = createHash('sha256').update(deleteTokenSalt).update(JSON.stringify({ payload, directory, refs, entries, status, index, modules: modules.map(m => m.signature) })).digest('hex');
+    const token = createHash('sha256').update(deleteTokenSalt).update(JSON.stringify({ payload, directory, refs, entries, changes, modules: modules.map(m => m.signature) })).digest('hex');
     const preview: DeletePreview = { ...payload, token };
     return { preview, repo, modules };
   }

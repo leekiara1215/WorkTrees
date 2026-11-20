@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { access, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { createWorktreeService } from '../src/main/worktree-service.ts';
-import { fixture, git } from './fixtures.ts';
+import { fixture, git, gitWithEnv } from './fixtures.ts';
 import type { DeletePreview } from '../src/shared/types.ts';
 
 function readableError(error: unknown) {
@@ -194,6 +195,31 @@ test('detached HEAD with unreferenced commit requires confirmation even when ret
   assert.equal(await git(checkout, 'rev-parse', 'HEAD'), head);
   await f.service.deleteWorktree(deletion(preview, true));
   await assert.rejects(access(checkout));
+});
+
+test('detached worktree preview scans directory trees and indexes larger than 16 MiB', async t => {
+  const f = await fixture(t);
+  const directory = Array(4).fill('folder-' + 'a'.repeat(180)).join('/');
+  const blob = await git(f.repoPath, 'rev-parse', 'HEAD:README.md');
+  const entries = Array.from({ length: 22_000 }, (_, i) => `100644 ${blob}\t${directory}/${i}.txt\0`).join('');
+  assert(Buffer.byteLength(entries) > 16 * 1024 * 1024);
+  const env = { GIT_INDEX_FILE: path.join(f.root, 'large-index') };
+  await gitWithEnv(f.repoPath, env, 'read-tree', 'HEAD');
+  execFileSync('git', ['-C', f.repoPath, 'update-index', '-z', '--index-info'], { env: { ...process.env, ...env }, input: entries });
+  const tree = await gitWithEnv(f.repoPath, env, 'write-tree');
+  const head = await git(f.repoPath, 'commit-tree', tree, '-p', 'HEAD', '-m', 'Large checkout');
+  const checkout = path.join(f.root, 'large checkout');
+  await git(f.repoPath, 'worktree', 'add', '--detach', checkout, head);
+  const entry = (await f.service.getSnapshot()).worktrees.find(w => w.path === checkout)!;
+  const preview = await f.service.previewDelete(entry.id, false);
+  assert.equal(preview.trackedChanges, 0);
+  assert.equal(preview.uniqueCommits, 1);
+  assert(preview.requiresConfirmation);
+
+  await git(checkout, 'mv', '--', 'README.md', 'renamed\t内容.md');
+  const updated = await f.service.previewDelete(entry.id, false);
+  assert.equal(updated.trackedChanges, 1);
+  assert.notEqual(updated.token, preview.token);
 });
 
 test('preview is invalidated when checkout HEAD changes before deletion', async t => {

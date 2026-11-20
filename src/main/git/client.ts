@@ -39,6 +39,43 @@ export function git(cwd: string, args: string[]): Promise<string> {
   });
 }
 
+/** Read Git's NUL-delimited output without buffering the entire listing. */
+export async function gitRecords(cwd: string, args: string[], onRecord: (record: Buffer) => void): Promise<void> {
+  const child = spawn('git', gitArgs(cwd, args), {
+    env: gitEnvironment(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  });
+  let stderr = '';
+  let spawnError: NodeJS.ErrnoException | undefined;
+  let timedOut = false;
+  child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-65_536); });
+  child.on('error', error => { spawnError = error; });
+  const closed = new Promise<number | null>(done => child.once('close', done));
+  const timeout = setTimeout(() => { timedOut = child.kill('SIGKILL'); }, 30_000);
+
+  const partial: Buffer[] = [];
+  try {
+    for await (const chunk of child.stdout as AsyncIterable<Buffer>) {
+      let start = 0;
+      for (let end = chunk.indexOf(0); end !== -1; end = chunk.indexOf(0, start)) {
+        const bytes = chunk.subarray(start, end);
+        onRecord(partial.length ? Buffer.concat([...partial, bytes]) : bytes);
+        partial.length = 0;
+        start = end + 1;
+      }
+      if (start < chunk.length) partial.push(chunk.subarray(start));
+    }
+    const code = await closed;
+    const details = stderr.trim() || spawnError?.message;
+    if (spawnError?.code === 'ENOENT') throw new ServiceError('GIT_NOT_FOUND', '未找到 Git，请先安装 Git 并重新启动应用。', details);
+    if (timedOut) throw new ServiceError('GIT_TIMEOUT', 'Git 操作超时，请检查仓库后重试。', details, true);
+    if (code !== 0 || partial.length) throw new ServiceError('GIT_ERROR', 'Git 操作失败，请查看详情。', details ?? args.join(' '), true);
+  } finally {
+    clearTimeout(timeout);
+    if (child.exitCode === null && child.signalCode === null && child.pid) child.kill('SIGKILL');
+    await closed;
+  }
+}
+
 function cancelled(details?: string): ServiceError {
   return new ServiceError('GIT_CANCELLED', '任务已取消。请检查目录状态后再试。', details, true);
 }
