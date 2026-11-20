@@ -8,12 +8,12 @@ export interface Branch { name: string; remote: boolean; current: boolean }
 export interface Worktree {
   id: string; repoId: string; repoName: string; path: string; branch: string | null; head: string | null;
   baseBranch: string | null; isMain: boolean; exists: boolean; locked: boolean; lockReason: string | null;
-  prunable: boolean; managed: boolean; createdAt: string | null; lastActivityAt: string | null;
+  prunable: boolean; managed: boolean; canRemoveRecord: boolean; createdAt: string | null; lastActivityAt: string | null;
   stale: boolean; error: AppError | null;
 }
 export interface Snapshot { settings: Settings; repositories: Repository[]; worktrees: Worktree[]; errors: AppError[]; refreshedAt: string }
-export interface CreateInput { repoId: string; baseBranch: string; branchName: string }
-export interface CreatePreview { repoId: string; branch: string; baseBranch: string; path: string; warnings: string[] }
+export interface CreateInput { repoId: string; baseBranch: string; branchName: string; useExistingBranch?: boolean }
+export interface CreatePreview { repoId: string; branch: string; baseBranch: string; path: string; warnings: string[]; retry?: RecoveryPreview; useExistingBranch?: boolean }
 export interface RecoveryPreview { worktreeId: string; path: string; branch: string; baseBranch: string | null; branchExists: boolean; action: 'recreate-existing-branch' | 'recreate-from-base'; warnings: string[] }
 export interface DeletePreview {
   worktreeId: string; path: string; branch: string | null; head: string | null;
@@ -43,9 +43,11 @@ export interface AppApi {
   updateSettings(patch: Partial<Settings>): Promise<Result<Settings>>;
   listBranches(repoId: string): Promise<Result<Branch[]>>;
   previewCreate(input: CreateInput): Promise<Result<CreatePreview>>;
-  createWorktree(input: CreateInput): Promise<Result<Worktree>>;
+  createWorktree(input: CreateInput, taskId: string): Promise<Result<Worktree>>;
   previewRecovery(worktreeId: string): Promise<Result<RecoveryPreview>>;
-  recreateWorktree(worktreeId: string): Promise<Result<Worktree>>;
+  recreateWorktree(worktreeId: string, taskId: string): Promise<Result<Worktree>>;
+  cancelCheckout(taskId: string): Promise<Result<void>>;
+  removeWorktreeRecord(worktreeId: string): Promise<Result<void>>;
   previewDelete(worktreeId: string, deleteBranch: boolean): Promise<Result<DeletePreview>>;
   deleteWorktree(input: DeleteInput): Promise<Result<DeleteOutcome>>;
   revealPath(path: string): Promise<Result<void>>;

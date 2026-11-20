@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_THEME_COLOR, type ThemeColor } from '../shared/theme-colors';
 import type { AppError, DeleteOutcome, Repository, Snapshot, Worktree } from '../shared/types';
-import { CreateDialog, DeleteDialog, RecoveryDialog } from './dialogs';
+import { CreateDialog, DeleteDialog, RecoveryDialog, RemoveRecordDialog } from './dialogs';
 import { SettingsDialog } from './SettingsDialog';
 import { appError, ErrorNotice, Icon, request, Spinner } from './ui';
 
@@ -91,6 +91,15 @@ export default function App() {
     setToast(outcome.warnings.length ? '目录已删除，请查看后续处理提示' : outcome.branchDeleted ? '工作目录与本地分支已删除' : '工作目录已删除');
     void refresh();
   }
+  function closeWorktreeDialog() {
+    setDialog(null);
+    void refresh();
+  }
+  function removedRecord() {
+    setActionError(null);
+    setToast('已移除应用记录');
+    closeWorktreeDialog();
+  }
 
   const repositories = snapshot?.repositories ?? [];
   const worktrees = snapshot?.worktrees ?? [];
@@ -133,10 +142,12 @@ export default function App() {
       </main>
     </div>
     {toast && <div className="toast" role="status"><Icon name="check" size={17} />{toast}<button type="button" className="icon-button" aria-label="关闭提示" onClick={() => setToast('')}><Icon name="close" size={14} /></button></div>}
-    {dialog?.kind === 'create' && snapshot && <CreateDialog repositories={repositories} settings={snapshot.settings} initialRepoId={repoId} onClose={() => setDialog(null)} onCreated={worktree => completed(worktree)} />}
+    {dialog?.kind === 'create' && snapshot && <CreateDialog repositories={repositories} settings={snapshot.settings} initialRepoId={repoId} onClose={closeWorktreeDialog} onCreated={completed} />}
     {dialog?.kind === 'settings' && snapshot && <SettingsDialog settings={snapshot.settings} themeColor={themeColor} onThemeChange={setThemeColor} repositories={repositories} onClose={changed => { setDialog(null); if (changed) void refresh(); }} onRepositoryRemoved={() => void refresh()} />}
-    {dialog?.kind === 'delete' && <DeleteDialog worktree={dialog.worktree} onClose={() => setDialog(null)} onDeleted={deleted} />}
-    {dialog?.kind === 'recovery' && <RecoveryDialog worktree={dialog.worktree} onClose={() => setDialog(null)} onRecovered={worktree => completed(worktree, true)} />}
+    {dialog?.kind === 'delete' && (dialog.worktree.canRemoveRecord
+      ? <RemoveRecordDialog worktree={dialog.worktree} onClose={closeWorktreeDialog} onRemoved={removedRecord} />
+      : <DeleteDialog worktree={dialog.worktree} onClose={closeWorktreeDialog} onDeleted={deleted} />)}
+    {dialog?.kind === 'recovery' && <RecoveryDialog worktree={dialog.worktree} onClose={closeWorktreeDialog} onRecovered={worktree => completed(worktree, true)} />}
   </>;
 }
 
@@ -144,5 +155,6 @@ function WorktreeCard({ worktree, pathAction, onPathAction, onRecover, onDelete 
   const missing = !worktree.exists;
   const exceptional = !!worktree.error || worktree.prunable;
   const canRecover = missing && worktree.managed && !worktree.isMain;
-  return <article className={`worktree-card ${missing ? 'is-missing' : ''} ${exceptional ? 'is-exceptional' : ''}`}><div className={`worktree-symbol ${missing ? 'missing' : worktree.isMain ? 'main' : ''}`}><Icon name={missing ? 'alert' : worktree.isMain ? 'folder' : 'branch'} size={21} /></div><div className="worktree-info"><div className="worktree-title"><h3 title={worktree.branch || worktree.head || undefined}>{worktree.branch || (worktree.head ? `游离 HEAD · ${worktree.head.slice(0, 8)}` : folderName(worktree.path))}</h3>{worktree.isMain ? <span className="badge main">主仓库</span> : !worktree.managed ? <span className="badge external">外部目录</span> : null}{missing && <span className="badge missing">目录缺失</span>}{worktree.locked && <span className="badge locked" title={worktree.lockReason || '已锁定'}><Icon name="lock" size={11} />已锁定</span>}{worktree.stale && <span className="badge stale">闲置</span>}{exceptional && <span className="badge error">异常</span>}</div><div className="worktree-path"><span title={worktree.path}>{worktree.path}</span><button type="button" className="path-copy" onClick={() => onPathAction('copy')} aria-label={`复制 ${worktree.branch || folderName(worktree.path)} 的完整路径`} title="复制完整路径" disabled={!!pathAction}><Icon name="copy" size={13} /></button></div><div className="worktree-meta"><span><Icon name="clock" size={12} />{formatDate(worktree.lastActivityAt)}</span>{worktree.baseBranch && <span className="base-branch">基于 {worktree.baseBranch}</span>}{worktree.locked && worktree.lockReason && <span className="lock-reason" title={worktree.lockReason}>锁定原因：{worktree.lockReason}</span>}</div>{worktree.error && <div className="row-error"><Icon name="alert" size={13} /><span>{worktree.error.message}</span>{worktree.error.details && <details><summary>详情</summary><p>{worktree.error.details}</p></details>}</div>}{worktree.prunable && !worktree.error && <p className="row-hint">Git 记录标记为可清理，请检查原目录与仓库状态。</p>}{missing && !canRecover && <p className="row-hint">{worktree.isMain ? '主仓库目录缺失，请检查原路径或重新导入仓库。' : '此目录由外部工具创建，没有可用的重建记录。'}</p>}</div><div className="worktree-actions">{canRecover ? <button type="button" className="button recovery-button" onClick={onRecover} disabled={worktree.locked} title={worktree.locked ? '此 Worktree 已锁定，请先在仓库中检查锁定原因' : '预览并确认重建目录'}><Icon name="restore" size={15} />重建目录</button> : <button type="button" className="button open-button" onClick={() => onPathAction('reveal')} disabled={missing || !!pathAction} title={missing ? '目录不存在，无法打开' : '在文件管理器中显示'}>{pathAction === `${worktree.id}:reveal` ? <Spinner label="打开中" /> : <><Icon name="folder" size={15} />打开目录<Icon name="arrow" size={14} /></>}</button>}{!worktree.isMain && <button type="button" className="button delete-button" onClick={onDelete} disabled={worktree.locked || !!pathAction} title={worktree.locked ? `此 Worktree 已锁定，请先检查锁定原因${worktree.lockReason ? `：${worktree.lockReason}` : ''}` : '检查修改与提交，确认后删除 Worktree'} aria-label={`安全删除 ${worktree.branch || folderName(worktree.path)}`}><Icon name="trash" size={14} />安全删除</button>}</div></article>;
+  const deleteLabel = worktree.canRemoveRecord ? '移除记录' : '安全删除';
+  return <article className={`worktree-card ${missing ? 'is-missing' : ''} ${exceptional ? 'is-exceptional' : ''}`}><div className={`worktree-symbol ${missing ? 'missing' : worktree.isMain ? 'main' : ''}`}><Icon name={missing ? 'alert' : worktree.isMain ? 'folder' : 'branch'} size={21} /></div><div className="worktree-info"><div className="worktree-title"><h3 title={worktree.branch || worktree.head || undefined}>{worktree.branch || (worktree.head ? `游离 HEAD · ${worktree.head.slice(0, 8)}` : folderName(worktree.path))}</h3>{worktree.isMain ? <span className="badge main">主仓库</span> : !worktree.managed ? <span className="badge external">外部目录</span> : null}{missing && <span className="badge missing">目录缺失</span>}{worktree.locked && <span className="badge locked" title={worktree.lockReason || '已锁定'}><Icon name="lock" size={11} />已锁定</span>}{worktree.stale && <span className="badge stale">闲置</span>}{exceptional && <span className="badge error">异常</span>}</div><div className="worktree-path"><span title={worktree.path}>{worktree.path}</span><button type="button" className="path-copy" onClick={() => onPathAction('copy')} aria-label={`复制 ${worktree.branch || folderName(worktree.path)} 的完整路径`} title="复制完整路径" disabled={!!pathAction}><Icon name="copy" size={13} /></button></div><div className="worktree-meta"><span><Icon name="clock" size={12} />{formatDate(worktree.lastActivityAt)}</span>{worktree.baseBranch && <span className="base-branch">基于 {worktree.baseBranch}</span>}{worktree.locked && worktree.lockReason && <span className="lock-reason" title={worktree.lockReason}>锁定原因：{worktree.lockReason}</span>}</div>{worktree.error && <div className="row-error"><Icon name="alert" size={13} /><span>{worktree.error.message}</span>{worktree.error.details && <details><summary>详情</summary><p>{worktree.error.details}</p></details>}</div>}{worktree.prunable && !worktree.error && <p className="row-hint">Git 记录标记为可清理，请检查原目录与仓库状态。</p>}{missing && !canRecover && <p className="row-hint">{worktree.isMain ? '主仓库目录缺失，请检查原路径或重新导入仓库。' : '此目录由外部工具创建，没有可用的重建记录。'}</p>}</div><div className="worktree-actions">{canRecover ? <button type="button" className="button recovery-button" onClick={onRecover} disabled={worktree.locked} title={worktree.locked ? '此 Worktree 已锁定，请先在仓库中检查锁定原因' : '预览并确认重建目录'}><Icon name="restore" size={15} />重建目录</button> : <button type="button" className="button open-button" onClick={() => onPathAction('reveal')} disabled={missing || !!pathAction} title={missing ? '目录不存在，无法打开' : '在文件管理器中显示'}>{pathAction === `${worktree.id}:reveal` ? <Spinner label="打开中" /> : <><Icon name="folder" size={15} />打开目录<Icon name="arrow" size={14} /></>}</button>}{!worktree.isMain && <button type="button" className="button delete-button" onClick={onDelete} disabled={worktree.locked || !!pathAction} title={worktree.locked ? `此 Worktree 已锁定，请先检查锁定原因${worktree.lockReason ? `：${worktree.lockReason}` : ''}` : worktree.canRemoveRecord ? '移除应用中的残留记录' : '检查修改与提交，确认后删除 Worktree'} aria-label={`${deleteLabel} ${worktree.branch || folderName(worktree.path)}`}><Icon name="trash" size={14} />{deleteLabel}</button>}</div></article>;
 }

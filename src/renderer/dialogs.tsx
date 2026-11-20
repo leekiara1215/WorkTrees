@@ -1,8 +1,9 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { AppError, Branch, CreatePreview, DeleteOutcome, DeletePreview, RecoveryPreview, Repository, Settings, SubmoduleDeletePreview, Worktree } from '../shared/types';
 import { appError, ErrorNotice, Icon, Modal, request, Spinner } from './ui';
+import { CheckoutFooter, useCheckout } from './checkout';
 
-export function CreateDialog({ repositories, settings, initialRepoId, onClose, onCreated }: { repositories: Repository[]; settings: Settings; initialRepoId: string; onClose: () => void; onCreated: (worktree: Worktree) => void }) {
+export function CreateDialog({ repositories, settings, initialRepoId, onClose, onCreated }: { repositories: Repository[]; settings: Settings; initialRepoId: string; onClose: () => void; onCreated: (worktree: Worktree, recovering: boolean) => void }) {
   const [repoId, setRepoId] = useState(initialRepoId || repositories[0]?.id || '');
   const [branches, setBranches] = useState<Branch[]>([]);
   const [baseBranch, setBaseBranch] = useState('');
@@ -11,15 +12,19 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
   const [branchError, setBranchError] = useState<AppError | null>(null);
   const [branchReload, setBranchReload] = useState(0);
   const [preview, setPreview] = useState<{ key: string; data: CreatePreview } | { key: string; error: AppError } | null>(null);
-  const [saving, setSaving] = useState(false);
+  const checkout = useCheckout();
+  const saving = !!checkout.taskId;
+  const [operationError, setOperationError] = useState<{ key: string; error: AppError } | null>(null);
   const [previewReload, setPreviewReload] = useState(0);
+  const [existingBranchKey, setExistingBranchKey] = useState<string | null>(null);
   const branchNameId = useId();
-  const busyRef = useRef(false);
   const previewRequest = useRef<Promise<CreatePreview> | null>(null);
   const repo = repositories.find(item => item.id === repoId);
   const name = branchName.trim();
-  const key = JSON.stringify([repoId, baseBranch, name, previewReload]);
-  const input = { repoId, baseBranch, branchName: name };
+  const inputKey = JSON.stringify([repoId, baseBranch, name]);
+  const useExistingBranch = existingBranchKey === inputKey;
+  const key = JSON.stringify([inputKey, previewReload, useExistingBranch]);
+  const input = { repoId, baseBranch, branchName: name, useExistingBranch };
   const effectivePrefix = repo?.branchPrefix ?? settings.branchPrefix;
   const canPreview = !!(repoId && baseBranch && name && !branchesLoading);
 
@@ -41,7 +46,7 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
     const timer = window.setTimeout(async () => {
       await previewRequest.current?.catch(() => undefined);
       if (!active) return;
-      const pending = request(() => window.worktrees.previewCreate({ repoId, baseBranch, branchName: name }));
+      const pending = request(() => window.worktrees.previewCreate({ repoId, baseBranch, branchName: name, useExistingBranch }));
       previewRequest.current = pending;
       try {
         const data = await pending;
@@ -53,7 +58,7 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
       }
     }, 500);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [repoId, baseBranch, name, key, canPreview]);
+  }, [repoId, baseBranch, name, useExistingBranch, key, canPreview]);
 
   const result = canPreview && preview?.key === key ? preview : null;
   const currentPreview = result && 'data' in result ? result.data : null;
@@ -64,18 +69,22 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
     setBranchName(value);
   }
   function generateBranchName() {
-    if (busyRef.current || branchesLoading) return;
+    if (saving || branchesLoading) return;
     const today = new Date();
     const date = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
     const suffix = crypto.randomUUID().replaceAll('-', '').slice(0, 6);
     updateBranchName(`work-${date}-${suffix}`);
   }
   async function create() {
-    if (busyRef.current || !currentPreview) return;
-    busyRef.current = true; setSaving(true);
-    try { const worktree = await request(() => window.worktrees.createWorktree(input)); onCreated(worktree); }
-    catch (error) { setPreview({ key, error: appError(error) }); }
-    finally { busyRef.current = false; setSaving(false); }
+    if (saving || !currentPreview) return;
+    setOperationError(null);
+    try {
+      const worktree = await checkout.run(id => window.worktrees.createWorktree(input, id));
+      if (worktree) onCreated(worktree, !!currentPreview.retry);
+    } catch (error) {
+      setOperationError({ key: inputKey, error: appError(error) });
+      setPreviewReload(value => value + 1);
+    }
   }
   return <Modal title="创建 Worktree" subtitle="从一个基准分支，开启独立的工作目录。" onClose={onClose} busy={saving}>
     <form onSubmit={event => { event.preventDefault(); void create(); }}>
@@ -93,15 +102,18 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
           <div className="create-preview-content" tabIndex={0} aria-label="分支、路径和校验结果">
             <dl className="preview-values">
               <div><dt>完整分支</dt><dd>{currentPreview?.branch ?? (name ? effectivePrefix + name : '—')}</dd></div>
-              <div><dt>基准分支</dt><dd>{baseBranch || '—'}</dd></div>
+              <div><dt>基准分支</dt><dd>{currentPreview?.baseBranch || baseBranch || '—'}</dd></div>
               <div><dt>完整路径</dt><dd className="path-value">{currentPreview?.path ?? '—'}</dd></div>
             </dl>
             {!!currentPreview?.warnings.length && <ul className="warning-list">{currentPreview.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>}
-            <ErrorNotice error={error} onRetry={() => setPreviewReload(value => value + 1)} />
+            <ErrorNotice error={error} onRetry={error?.code === 'BRANCH_EXISTS' ? undefined : () => setPreviewReload(value => value + 1)} />
+            {error?.code === 'BRANCH_EXISTS' && <button type="button" className="button secondary branch-choice" onClick={() => setExistingBranchKey(inputKey)}>使用已有分支</button>}
+            {useExistingBranch && !currentPreview?.retry && <button type="button" className="text-button branch-choice" disabled={saving} onClick={() => setExistingBranchKey(null)}>改为新建分支</button>}
           </div>
         </section>
+        <ErrorNotice error={operationError?.key === inputKey ? operationError.error : null} />
       </div>
-      <div className="modal-footer"><span className="footer-hint"><Icon name="folder" size={15} />独立目录，共享 Git 历史</span><div className="button-row"><button type="button" className="button secondary" onClick={onClose} disabled={saving}>取消</button><button type="submit" className="button primary" disabled={saving || previewing || branchesLoading || !currentPreview}>{saving ? <Spinner label="正在创建" /> : <><Icon name="plus" size={16} />确认创建</>}</button></div></div>
+      {saving ? <CheckoutFooter key={checkout.taskId!} label={currentPreview?.retry ? '正在重建' : '正在创建'} checkout={checkout} /> : <div className="modal-footer"><span className="footer-hint"><Icon name="folder" size={15} />独立目录，共享 Git 历史</span><div className="button-row"><button type="button" className="button secondary" onClick={onClose}>取消</button><button type="submit" className="button primary" disabled={previewing || branchesLoading || !currentPreview}><Icon name={currentPreview?.retry ? 'restore' : 'plus'} size={16} />{currentPreview?.retry ? '重试并重建' : currentPreview?.useExistingBranch ? '检出已有分支' : '确认创建'}</button></div></div>}
     </form>
   </Modal>;
 }
@@ -109,10 +121,11 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
 export function RecoveryDialog({ worktree, onClose, onRecovered }: { worktree: Worktree; onClose: () => void; onRecovered: (worktree: Worktree) => void }) {
   const [preview, setPreview] = useState<RecoveryPreview | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const checkout = useCheckout();
+  const saving = !!checkout.taskId;
   const [error, setError] = useState<AppError | null>(null);
+  const [operationError, setOperationError] = useState<AppError | null>(null);
   const [reload, setReload] = useState(0);
-  const busyRef = useRef(false);
   useEffect(() => {
     let active = true;
     setLoading(true); setError(null); setPreview(null);
@@ -120,15 +133,58 @@ export function RecoveryDialog({ worktree, onClose, onRecovered }: { worktree: W
     return () => { active = false; };
   }, [worktree.id, reload]);
   async function recover() {
-    if (busyRef.current || !preview) return;
-    busyRef.current = true; setSaving(true); setError(null);
-    try { const data = await request(() => window.worktrees.recreateWorktree(worktree.id)); onRecovered(data); }
-    catch (error) { setError(appError(error)); setPreview(null); }
-    finally { busyRef.current = false; setSaving(false); }
+    if (saving || !preview) return;
+    setOperationError(null);
+    try {
+      const data = await checkout.run(id => window.worktrees.recreateWorktree(worktree.id, id));
+      if (data) onRecovered(data);
+    } catch (error) {
+      setOperationError(appError(error));
+      setPreview(null);
+      setReload(value => value + 1);
+    }
   }
   return <Modal title="重建缺失 Worktree" subtitle="使用保存的记录，重新创建工作目录。" onClose={onClose} busy={saving}>
     <div className="modal-body form-stack">{loading && <div className="dialog-loading"><Spinner label="正在检查分支与目录" /></div>}{preview && <><div className="recovery-explanation"><span className="recovery-icon"><Icon name="restore" size={23} /></span><div><strong>{preview.action === 'recreate-existing-branch' ? '使用已有分支重建' : '从记录的基准分支重建'}</strong><p>{preview.action === 'recreate-existing-branch' ? '分支仍然存在，将检出该分支到原目录。' : '原分支已不存在，将从下方基准分支重新创建分支与目录。'}</p></div></div><div className="preview-panel ready"><dl className="preview-values"><div><dt>仓库</dt><dd>{worktree.repoName}</dd></div><div><dt>目标分支</dt><dd>{preview.branch}</dd></div>{preview.action === 'recreate-from-base' && <div><dt>基准分支</dt><dd>{preview.baseBranch ?? '无可用基准分支'}</dd></div>}<div><dt>恢复目录</dt><dd className="path-value">{preview.path}</dd></div></dl></div>{preview.warnings.length > 0 && <ul className="warning-list">{preview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>}<div className="safety-note"><Icon name="alert" size={18} /><p>重建不会恢复未提交的文件。目标目录必须不存在，已有目录不会被覆盖。</p></div></>}<ErrorNotice error={error} onRetry={() => setReload(value => value + 1)} /></div>
-    <div className="modal-footer"><span className="footer-hint">失败后保留记录，可再次重试</span><div className="button-row"><button type="button" className="button secondary" onClick={onClose} disabled={saving}>取消</button><button type="button" className="button primary" onClick={() => void recover()} disabled={saving || loading || !preview || (preview.action === 'recreate-from-base' && !preview.baseBranch)}>{saving ? <Spinner label="正在重建" /> : <><Icon name="restore" size={16} />确认重建</>}</button></div></div>
+    {operationError && <div className="checkout-error"><ErrorNotice error={operationError} /></div>}
+    {saving ? <CheckoutFooter key={checkout.taskId!} label="正在重建" checkout={checkout} /> : <div className="modal-footer"><span className="footer-hint">失败后保留记录，可再次重试</span><div className="button-row"><button type="button" className="button secondary" onClick={onClose}>取消</button><button type="button" className="button primary" onClick={() => void recover()} disabled={loading || !preview}><Icon name="restore" size={16} />确认重建</button></div></div>}
+  </Modal>;
+}
+
+export function RemoveRecordDialog({ worktree, onClose, onRemoved }: { worktree: Worktree; onClose: () => void; onRemoved: () => void }) {
+  const busy = useRef(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<AppError | null>(null);
+
+  async function remove() {
+    if (busy.current) return;
+    busy.current = true;
+    setSaving(true);
+    setError(null);
+    try {
+      await request(() => window.worktrees.removeWorktreeRecord(worktree.id));
+      onRemoved();
+    } catch (error) {
+      setError(appError(error));
+    } finally {
+      busy.current = false;
+      setSaving(false);
+    }
+  }
+
+  return <Modal title="移除 Worktree 记录" subtitle="只移除应用保存的重建记录，保留本地分支和提交。" onClose={onClose} busy={saving}>
+    <div className="modal-body form-stack">
+      <div className="preview-panel ready"><dl className="preview-values">
+        <div><dt>仓库</dt><dd>{worktree.repoName}</dd></div>
+        <div><dt>分支</dt><dd>{worktree.branch ?? '—'}</dd></div>
+        <div><dt>原路径</dt><dd className="path-value">{worktree.path}</dd></div>
+      </dl></div>
+      <ErrorNotice error={error} />
+    </div>
+    <div className="modal-footer"><span className="footer-hint">确认前会重新检查原目录与 Git 注册</span><div className="button-row">
+      <button type="button" className="button secondary" onClick={onClose} disabled={saving}>取消</button>
+      <button type="button" className="button primary" onClick={() => void remove()} disabled={saving}>{saving ? <Spinner label="正在移除" /> : '确认移除记录'}</button>
+    </div></div>
   </Modal>;
 }
 

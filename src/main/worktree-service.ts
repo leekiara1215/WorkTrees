@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { homedir } from 'node:os';
 import { isThemeColor } from '../shared/theme-colors.js';
 import type { AppError, Branch, CreateInput, CreatePreview, DeleteInput, DeleteOutcome, DeletePreview, RecoveryPreview, Repository, Settings, Snapshot, Worktree } from '../shared/types.js';
-import { git, listGitWorktrees, ServiceError, type GitWorktree } from './git/client.js';
+import { checkCheckoutCancellation, checkoutGit, git, listGitWorktrees, ServiceError, type GitWorktree } from './git/client.js';
 import { createStore, type ManagedWorktree, type StoreData } from './storage/store.js';
 import { inspectDeleteDirectory, isInside } from './delete-safety.js';
 import { completeSubmoduleRemoval, hasSubmoduleFiles, inspectSubmodules, preserveSubmodules, trackedFileChanges } from './submodule-delete.js';
@@ -115,12 +115,10 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     const repo = repository(input.repoId);
     await requireRepo(repo);
     text(input.baseBranch, '基准分支'); text(input.branchName, '分支名', 240);
+    if (input.useExistingBranch !== undefined && typeof input.useExistingBranch !== 'boolean') fail('INVALID_INPUT', '是否使用已有分支必须明确选择。');
     await validateBranch(repo, input.branchName);
     const branch = (repo.branchPrefix ?? data.settings.branchPrefix) + input.branchName;
     await validateBranch(repo, branch);
-    const refs = await branches(repo);
-    if (!refs.some(ref => ref.name === input.baseBranch)) fail('BASE_BRANCH_MISSING', '基准分支不存在，请刷新分支列表。', input.baseBranch);
-    if (refs.some(ref => !ref.remote && ref.name === branch)) fail('BRANCH_EXISTS', '目标分支已存在，请使用新的分支名。', branch);
     // Git records physical paths. Resolve existing ancestors before saving a future path,
     // including common macOS aliases such as /tmp -> /private/tmp.
     const root = await physicalPath(rootPath(data.settings.worktreeRoot, repo));
@@ -128,12 +126,28 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     const path = join(root, leaf);
     const rel = relative(root, path);
     if (!rel || rel.startsWith(`..${sep}`) || isAbsolute(rel)) fail('INVALID_PATH', '生成的目录超出根目录。');
-    if (await occupied(path)) fail('PATH_EXISTS', '目标目录已存在，请调整根目录或分支名称。', path);
-    const registrations = await listGitWorktrees(repo.path);
-    if (registrations.some(w => samePath(w.path, path)) || data.managedWorktrees.some(w => samePath(w.path, path))) fail('PATH_REGISTERED', '该路径已有 Worktree 记录，请从异常列表重建或调整名称。', path);
     const warnings: string[] = [];
     const inside = relative(repo.path, path);
     if (inside && !inside.startsWith(`..${sep}`) && inside !== '..' && !isAbsolute(inside)) warnings.push('目标目录位于原仓库内，可能被原仓库视为未跟踪文件。');
+    const records = data.managedWorktrees.filter(w => samePath(w.path, path));
+    const record = records.length === 1 ? records[0] : undefined;
+    if (record?.repoId === repo.id && record.branch === branch && !await occupied(path)) {
+      const retry = await recovery(record.id);
+      return { repoId: repo.id, branch, baseBranch: record.baseBranch, path, warnings: [...warnings, ...retry.warnings], retry };
+    }
+    const refs = await branches(repo);
+    if (!refs.some(ref => ref.name === input.baseBranch)) fail('BASE_BRANCH_MISSING', '基准分支不存在，请刷新分支列表。', input.baseBranch);
+    const branchExists = refs.some(ref => !ref.remote && ref.name === branch);
+    if (branchExists && !input.useExistingBranch) fail('BRANCH_EXISTS', '目标分支已存在，可以使用该分支或输入新的分支名。', branch);
+    if (!branchExists && input.useExistingBranch) fail('BRANCH_MISSING', '目标分支已不存在，请重新校验。', branch);
+    if (await occupied(path)) fail('PATH_EXISTS', '目标目录已存在，请调整根目录或分支名称。', path);
+    const registrations = await listGitWorktrees(repo.path);
+    if (registrations.some(w => samePath(w.path, path)) || records.length) fail('PATH_REGISTERED', '该路径已有 Worktree 记录，请从异常列表重建或调整名称。', path);
+    if (input.useExistingBranch) {
+      if (registrations.some(w => w.branch === branch)) fail('BRANCH_IN_USE', '该分支已被其他 Worktree 使用。', branch);
+      warnings.push('使用现有分支的当前提交检出到新目录，保留已有提交。');
+      return { repoId: repo.id, branch, baseBranch: input.baseBranch, path, warnings, useExistingBranch: true };
+    }
     return { repoId: repo.id, branch, baseBranch: input.baseBranch, path, warnings };
   }
   async function activity(path: string): Promise<string | null> {
@@ -160,13 +174,15 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
       } catch (e) { error = appError(e); }
     }
     const lastActivityAt = exists ? await activity(path) : null;
+    const isMain = samePath(path, mainPath ?? repo.path);
     return {
       id: record?.id ?? `external-${createHash('sha256').update(`${repo.id}\0${path}`).digest('hex').slice(0, 24)}`,
       repoId: repo.id, repoName: repo.name, path, branch: discovered?.branch ?? record?.branch ?? null,
       head: discovered?.head ?? null, baseBranch: record?.baseBranch ?? null,
-      isMain: samePath(path, mainPath ?? repo.path), exists, locked: discovered?.locked ?? false,
+      isMain, exists, locked: discovered?.locked ?? false,
       lockReason: discovered?.lockReason ?? null, prunable: discovered?.prunable ?? false,
-      managed: !!record, createdAt: record?.createdAt ?? null, lastActivityAt,
+      managed: !!record, canRemoveRecord: !!record && !discovered && !exists && !repoError && !isMain,
+      createdAt: record?.createdAt ?? null, lastActivityAt,
       stale: !!lastActivityAt && Date.now() - Date.parse(lastActivityAt) > data.settings.staleDays * 86_400_000, error,
     };
   }
@@ -189,17 +205,48 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     const repo = repository(record.repoId); await requireRepo(repo);
     if (await occupied(record.path)) fail('PATH_EXISTS', '原目录已经存在，重建不会覆盖已有目录。', record.path);
     if (!isAbsolute(record.path) || samePath(record.path, repo.path)) fail('INVALID_PATH', '保存的 Worktree 路径无效。');
+    if (!samePath(record.path, await physicalPath(record.path))) fail('WORKTREE_CONFLICT', '原目录的实际路径已变化，请检查后再重建。', record.path);
     await validateBranch(repo, record.branch);
-    const registrations = await listGitWorktrees(repo.path);
-    const entry = registrations.find(w => samePath(w.path, record.path));
-    if (entry?.locked) fail('WORKTREE_LOCKED', 'Worktree 已锁定，请先在 Git 中确认并解除锁定。', entry.lockReason ?? record.path);
-    if (entry && entry.branch !== record.branch) fail('WORKTREE_CONFLICT', '路径注册的分支与保存记录不一致，请先检查 Git Worktree 状态。');
-    if (registrations.some(w => w.branch === record.branch && !samePath(w.path, record.path))) fail('BRANCH_IN_USE', '该分支已被其他 Worktree 使用，无法在原路径重建。', record.branch);
+    recoveryRegistration(record, await listGitWorktrees(repo.path));
     const refs = await branches(repo);
     const branchExists = refs.some(b => !b.remote && b.name === record.branch);
     if (!branchExists && !refs.some(b => b.name === record.baseBranch)) fail('BASE_BRANCH_MISSING', '原分支和记录的基准分支均不存在，无法重建。', record.baseBranch);
     return { worktreeId, path: record.path, branch: record.branch, baseBranch: record.baseBranch, branchExists,
       action: branchExists ? 'recreate-existing-branch' : 'recreate-from-base', warnings: [branchExists ? '使用现有分支重建目录。' : `原分支已不存在，将从 ${record.baseBranch} 重新创建。`, '无法恢复原目录中未提交的修改或未跟踪文件。'] };
+  }
+  function recoveryRegistration(record: ManagedWorktree, registrations: GitWorktree[]): GitWorktree | undefined {
+    const entry = registrations.find(w => samePath(w.path, record.path));
+    if (entry?.locked) fail('WORKTREE_LOCKED', 'Worktree 已锁定，请先在 Git 中确认并解除锁定。', entry.lockReason ?? record.path);
+    if (entry && entry.branch !== record.branch) fail('WORKTREE_CONFLICT', '路径注册的分支与保存记录不一致，请先检查 Git Worktree 状态。');
+    if (entry && !entry.prunable) fail('WORKTREE_CONFLICT', 'Git 尚未将原注册标记为可清理，请检查后再重建。', record.path);
+    if (registrations.some(w => w.branch === record.branch && !samePath(w.path, record.path))) fail('BRANCH_IN_USE', '该分支已被其他 Worktree 使用，无法在原路径重建。', record.branch);
+    return entry;
+  }
+  async function checkout(repo: Repository, record: ManagedWorktree, mode: 'create' | 'use-existing' | 'recover', signal?: AbortSignal): Promise<Worktree> {
+    checkCheckoutCancellation(signal);
+    await mkdir(dirname(record.path), { recursive: true });
+    const refs = await branches(repo);
+    const branchExists = mode !== 'create' && refs.some(b => !b.remote && b.name === record.branch);
+    if (mode === 'use-existing' && !branchExists) fail('BRANCH_MISSING', '目标分支已不存在，请重新校验。', record.branch);
+    const base = refs.find(b => !b.remote && b.name === record.baseBranch) ?? refs.find(b => b.remote && b.name === record.baseBranch);
+    const ref = branchExists ? record.branch : base && `${base.remote ? 'refs/remotes/' : 'refs/heads/'}${base.name}`;
+    if (!ref) fail('BASE_BRANCH_MISSING', '基准分支不存在，请刷新分支列表。', record.baseBranch);
+    const stale = mode === 'recover' && recoveryRegistration(record, await listGitWorktrees(repo.path));
+    if (!samePath(await physicalPath(record.path), record.path) || await occupied(record.path)) fail('PATH_EXISTS', '原路径已被占用或发生变化，已停止检出。', record.path);
+    checkCheckoutCancellation(signal);
+    if (mode !== 'recover') {
+      // Keep the intent if Git leaves a branch but cannot finish checkout.
+      await save({ ...data, managedWorktrees: [...data.managedWorktrees, record] });
+    }
+    const args = ['worktree', 'add'];
+    // Git requires --force to replace this exact, unlocked registration at a missing path.
+    if (stale) args.push('--force');
+    if (!branchExists) args.push('-b', record.branch);
+    await checkoutGit(repo.path, [...args, '--', record.path, ref], signal);
+    const found = (await listGitWorktrees(repo.path)).find(w => samePath(w.path, record.path));
+    const result = await worktree(repo, found, record);
+    if (found?.branch !== record.branch || !result.exists || result.error) fail('WORKTREE_INCOMPLETE', 'Git 检出后无法确认工作目录已就绪，请刷新列表检查。', result.error?.details ?? record.path);
+    return result;
   }
   function externalId(repo: Repository, path: string): string {
     return `external-${createHash('sha256').update(`${repo.id}\0${path}`).digest('hex').slice(0, 24)}`;
@@ -340,34 +387,36 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     }),
     listBranches: (repoId: string) => serial(() => branches(repository(repoId))),
     previewCreate: (input: CreateInput) => serial(() => preview(input)),
-    createWorktree: (input: CreateInput) => serial(async (): Promise<Worktree> => {
+    createWorktree: (input: CreateInput, signal?: AbortSignal) => serial(async (): Promise<Worktree> => {
+      checkCheckoutCancellation(signal);
       const plan = await preview(input); const repo = repository(plan.repoId);
+      if (plan.retry) {
+        const { worktreeId } = plan.retry;
+        const record = data.managedWorktrees.find(w => w.id === worktreeId)!;
+        return checkout(repo, record, 'recover', signal);
+      }
       const record: ManagedWorktree = { id: randomUUID(), repoId: repo.id, path: plan.path, branch: plan.branch, baseBranch: plan.baseBranch, createdAt: new Date().toISOString() };
-      await mkdir(dirname(plan.path), { recursive: true });
-      if (await occupied(plan.path)) fail('PATH_EXISTS', '目标目录已存在，已停止创建。', plan.path);
-      // Save intent first so an interrupted Git call or a later persistence failure remains recoverable.
-      await save({ ...data, managedWorktrees: [...data.managedWorktrees, record] });
-      const refs = await branches(repo);
-      const base = `${refs.some(b => !b.remote && b.name === plan.baseBranch) ? 'refs/heads/' : 'refs/remotes/'}${plan.baseBranch}`;
-      await git(repo.path, ['worktree', 'add', '-b', plan.branch, '--', plan.path, base]);
-      const found = (await listGitWorktrees(repo.path)).find(w => samePath(w.path, record.path));
-      return worktree(repo, found, record);
+      return checkout(repo, record, plan.useExistingBranch ? 'use-existing' : 'create', signal);
     }),
     previewRecovery: (worktreeId: string) => serial(() => recovery(worktreeId)),
-    recreateWorktree: (worktreeId: string) => serial(async (): Promise<Worktree> => {
-      const plan = await recovery(worktreeId);
+    recreateWorktree: (worktreeId: string, signal?: AbortSignal) => serial(async (): Promise<Worktree> => {
+      checkCheckoutCancellation(signal);
+      await recovery(worktreeId);
       const record = data.managedWorktrees.find(w => w.id === worktreeId)!; const repo = repository(record.repoId);
-      await mkdir(dirname(plan.path), { recursive: true });
-      if (await occupied(plan.path)) fail('PATH_EXISTS', '原目录已经存在，已停止重建。', plan.path);
-      const args = ['worktree', 'add'];
-      // Git -f replaces only a stale registration at this exact missing path; recovery() guards branch ownership and locks.
-      if ((await listGitWorktrees(repo.path)).some(w => samePath(w.path, plan.path))) args.push('--force');
-      if (!plan.branchExists) args.push('-b', plan.branch);
-      const refs = await branches(repo);
-      const base = `${refs.some(b => !b.remote && b.name === record.baseBranch) ? 'refs/heads/' : 'refs/remotes/'}${record.baseBranch}`;
-      args.push('--', plan.path, plan.branchExists ? plan.branch : base);
-      await git(repo.path, args);
-      return worktree(repo, (await listGitWorktrees(repo.path)).find(w => samePath(w.path, plan.path)), record);
+      return checkout(repo, record, 'recover', signal);
+    }),
+    removeWorktreeRecord: (worktreeId: string) => serial(async (): Promise<void> => {
+      text(worktreeId, 'Worktree ID');
+      const record = data.managedWorktrees.find(w => w.id === worktreeId) ?? fail('WORKTREE_NOT_MANAGED', '找不到可移除的应用记录，请刷新列表。');
+      const repo = repository(record.repoId);
+      await requireRepo(repo);
+      if (!isAbsolute(record.path) || samePath(record.path, repo.path)) fail('INVALID_PATH', '保存的 Worktree 路径无效。');
+      const path = await physicalPath(record.path);
+      const entries = await listGitWorktrees(repo.path);
+      if (entries.some(entry => samePath(entry.path, record.path) || samePath(entry.path, path)) || await occupied(record.path)) {
+        fail('WORKTREE_PRESENT', '目录或 Git Worktree 注册仍存在，请刷新后使用安全删除。', record.path);
+      }
+      await save({ ...data, managedWorktrees: data.managedWorktrees.filter(w => w.id !== record.id) });
     }),
     previewDelete: (worktreeId: string, deleteBranch: boolean) => serial(async (): Promise<DeletePreview> => (await deletion(worktreeId, deleteBranch)).preview),
     deleteWorktree: (input: DeleteInput) => serial(async (): Promise<DeleteOutcome> => {

@@ -1,7 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from 'electron';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { AppError, Result } from '../shared/types.js';
+import type { AppError, CreateInput, Result, Worktree } from '../shared/types.js';
 import { createWorktreeService } from './worktree-service.js';
 
 const developmentUrl = process.env.ELECTRON_RENDERER_URL;
@@ -80,8 +80,35 @@ async function createWindow() {
 if (instanceLock) app.whenReady().then(async () => {
   const service = createWorktreeService({ dataDir: app.getPath('userData') });
   const backupPaths = new Set<string>();
+  const checkouts = new Map<string, AbortController>();
+  async function runCheckout(taskId: unknown, operation: (signal: AbortSignal) => Promise<Worktree>) {
+    if (typeof taskId !== 'string' || !/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(taskId) || checkouts.has(taskId)) {
+      throw Object.assign(new Error('检出任务编号无效或已在运行。'), { code: 'INVALID_INPUT' });
+    }
+    const controller = new AbortController();
+    const contents = mainWindow!.webContents;
+    const stop = () => controller.abort();
+    checkouts.set(taskId, controller);
+    contents.once('destroyed', stop);
+    contents.once('render-process-gone', stop);
+    contents.once('did-start-loading', stop);
+    try {
+      return await operation(controller.signal);
+    } finally {
+      checkouts.delete(taskId);
+      contents.off('destroyed', stop);
+      contents.off('render-process-gone', stop);
+      contents.off('did-start-loading', stop);
+    }
+  }
+  handle('createWorktree', (input, taskId) => runCheckout(taskId, signal => service.createWorktree(input as CreateInput, signal)));
+  handle('recreateWorktree', (id, taskId) => runCheckout(taskId, signal => service.recreateWorktree(id as string, signal)));
+  // Cancellation must not wait behind the serial checkout it is stopping.
+  handle('cancelCheckout', taskId => {
+    if (typeof taskId === 'string') checkouts.get(taskId)?.abort();
+  });
   // Service validates every argument, including calls from untyped IPC boundaries.
-  const methods = ['getSnapshot', 'addRepository', 'removeRepository', 'updateRepository', 'updateSettings', 'listBranches', 'previewCreate', 'createWorktree', 'previewRecovery', 'recreateWorktree', 'previewDelete', 'deleteWorktree'] as const;
+  const methods = ['getSnapshot', 'addRepository', 'removeRepository', 'updateRepository', 'updateSettings', 'listBranches', 'previewCreate', 'previewRecovery', 'removeWorktreeRecord', 'previewDelete', 'deleteWorktree'] as const;
   for (const method of methods) handle(method, async (...args) => {
     const result = await Reflect.apply(service[method], service, args);
     if (method === 'deleteWorktree') for (const module of result.submodules) if (module.backupPath) backupPaths.add(module.backupPath);

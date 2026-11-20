@@ -62,3 +62,18 @@
 .settings-remove-confirm .button-row { justify-content: flex-end; }
 .settings-close-confirm { color: var(--text-secondary); font-size: 11px; line-height: 1.6; }
 .settings-close-confirm p { color: var(--muted); margin-top: 3px; }
+.checkout-footer { gap: 10px 16px; flex-wrap: wrap; }
+.checkout-footer .button-row { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+.checkout-footer select {
+  min-height: 35px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.checkout-status { display: grid; gap: 4px; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
+.checkout-status [role="alert"] { color: #a26855; }
+.checkout-error { padding: 0 27px 12px; }
+.branch-choice { margin-top: 10px; }

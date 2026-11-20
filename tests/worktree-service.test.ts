@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { access, mkdir, readFile, readdir, rename, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createWorktreeService } from '../src/main/worktree-service.ts';
 import { fixture, git, gitWithEnv } from './fixtures.ts';
 
@@ -173,6 +174,73 @@ test('missing managed worktree remains visible after Git metadata is pruned and 
   assert(missing && missing.managed && !missing.exists && missing.error);
   assert.equal(missing.path, created.path);
   assert.equal(missing.baseBranch, 'main');
+});
+
+async function configureCheckoutFilter(repoPath: string, command: string) {
+  await writeFile(path.join(repoPath, '.gitattributes'), 'payload.txt filter=checkout-test\n');
+  await writeFile(path.join(repoPath, 'payload.txt'), 'checkout payload\n');
+  await git(repoPath, 'add', '.gitattributes', 'payload.txt');
+  await git(repoPath, 'commit', '-m', 'Add filtered payload');
+  await git(repoPath, 'config', 'filter.checkout-test.smudge', command);
+  await git(repoPath, 'config', 'filter.checkout-test.required', 'true');
+}
+
+test('same-name creation retries a failed checkout with or without the retained branch', async t => {
+  const f = await fixture(t);
+  await configureCheckoutFilter(f.repoPath, 'false');
+  const retained = f.input('checkout-kept-branch');
+  const deleted = f.input('checkout-deleted-branch');
+  for (const input of [retained, deleted]) {
+    await assert.rejects(f.service.createWorktree(input), { code: 'GIT_ERROR' });
+  }
+  await git(f.repoPath, 'branch', '-d', 'wt/checkout-deleted-branch');
+  const restarted = createWorktreeService({ dataDir: f.dataDir });
+  const existing = await restarted.previewCreate(retained);
+  const missing = await restarted.previewCreate(deleted);
+  assert.equal(existing.retry?.action, 'recreate-existing-branch');
+  assert.equal(missing.retry?.action, 'recreate-from-base');
+  assert.equal(missing.baseBranch, 'main');
+
+  await git(f.repoPath, 'config', '--remove-section', 'filter.checkout-test');
+  for (const [input, plan] of [[retained, existing], [deleted, missing]] as const) {
+    const rebuilt = await restarted.createWorktree(input);
+    assert.equal(rebuilt.id, plan.retry?.worktreeId);
+    assert.equal(rebuilt.path, plan.path);
+    assert.equal(await git(rebuilt.path, 'branch', '--show-current'), plan.branch);
+    assert.equal(await readFile(path.join(rebuilt.path, 'payload.txt'), 'utf8'), 'checkout payload\n');
+  }
+});
+
+test('cancelling a running checkout stops its filter and leaves the branch available for retry', { skip: process.platform === 'win32', timeout: 15_000 }, async t => {
+  const f = await fixture(t);
+  const marker = path.join(f.root, 'filter-pid');
+  const script = path.join(f.root, 'slow-filter');
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  await writeFile(script, `#!/bin/sh\nprintf '%s\\n' "$$" > ${quote(marker)}\nexec sleep 60\n`, { mode: 0o700 });
+  await configureCheckoutFilter(f.repoPath, quote(script));
+  const input = f.input('checkout-cancelled');
+  const plan = await f.service.previewCreate(input);
+  const controller = new AbortController();
+  const checkingOut = f.service.createWorktree(input, controller.signal);
+  const outcome = checkingOut.catch(error => error);
+  let filterPid = 0;
+  try {
+    for (let attempt = 0; attempt < 100 && !filterPid; attempt++) {
+      filterPid = Number(await readFile(marker, 'utf8').catch(() => ''));
+      if (!filterPid) await delay(50);
+    }
+    assert(filterPid, 'checkout filter started');
+  } finally {
+    controller.abort();
+    await outcome;
+  }
+  await assert.rejects(checkingOut, { code: 'GIT_CANCELLED' });
+  assert.throws(() => process.kill(filterPid, 0), { code: 'ESRCH' });
+  const retry = await f.service.previewCreate(input);
+  assert.equal(retry.retry?.action, 'recreate-existing-branch');
+  assert.equal(retry.path, plan.path);
+  await git(f.repoPath, 'config', '--remove-section', 'filter.checkout-test');
+  assert.equal((await f.service.createWorktree(input)).id, retry.retry?.worktreeId);
 });
 
 test('recovery uses an existing branch and restores its latest committed content', async t => {

@@ -269,6 +269,40 @@ test('unregistered missing directory is refused and its recoverable managed reco
   await git(f.repoPath, 'show-ref', '--verify', `refs/heads/${created.branch}`);
 });
 
+test('removing a missing unregistered record rechecks the path and keeps branch commits', async t => {
+  const f = await fixture(t);
+  const created = await f.service.createWorktree(f.input('remove-record'));
+  const tip = await commitFile(created.path);
+  await rm(created.path, { recursive: true });
+  await assert.rejects(f.service.removeWorktreeRecord(created.id), { code: 'WORKTREE_PRESENT' });
+  await git(f.repoPath, 'worktree', 'prune', '--expire', 'now');
+  const snapshot = await f.service.getSnapshot();
+  assert.equal(snapshot.worktrees.find(tree => tree.id === created.id)?.canRemoveRecord, true);
+
+  await mkdir(created.path);
+  await writeFile(path.join(created.path, 'sentinel'), 'user data');
+  await assert.rejects(f.service.removeWorktreeRecord(created.id), { code: 'WORKTREE_PRESENT' });
+  assert.equal(await readFile(path.join(created.path, 'sentinel'), 'utf8'), 'user data');
+  await rm(created.path, { recursive: true });
+  const entries = await git(f.repoPath, 'worktree', 'list', '--porcelain');
+
+  await f.service.removeWorktreeRecord(created.id);
+  const restarted = createWorktreeService({ dataDir: f.dataDir });
+  assert(!(await restarted.getSnapshot()).worktrees.some(tree => tree.id === created.id));
+  assert.equal(await git(f.repoPath, 'rev-parse', `refs/heads/${created.branch}`), tip);
+  assert.equal(await git(f.repoPath, 'worktree', 'list', '--porcelain'), entries);
+
+  const input = { ...f.input('remove-record'), useExistingBranch: true };
+  assert.equal((await restarted.previewCreate(input)).useExistingBranch, true);
+  const attached = await restarted.createWorktree(input);
+  assert.equal(attached.path, created.path);
+  assert.notEqual(attached.id, created.id);
+  assert.equal(await git(attached.path, 'rev-parse', 'HEAD'), tip);
+  await assert.rejects(restarted.previewCreate({ ...f.input('absent-branch'), useExistingBranch: true }), { code: 'BRANCH_MISSING' });
+  await restarted.updateSettings({ branchPrefix: '' });
+  await assert.rejects(restarted.previewCreate({ ...f.input('main'), useExistingBranch: true }), { code: 'BRANCH_IN_USE' });
+});
+
 test('existing dirty content changing after preview invalidates risk confirmation', async t => {
   const f = await fixture(t);
   const created = await f.service.createWorktree(f.input('dirty-content-changed'));
