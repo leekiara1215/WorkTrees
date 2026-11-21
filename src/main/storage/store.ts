@@ -7,7 +7,7 @@ import type { Repository, Settings } from '../../shared/types.js';
 import { ServiceError } from '../git/client.js';
 
 export interface ManagedWorktree {
-  id: string; repoId: string; path: string; branch: string; baseBranch: string; createdAt: string;
+  id: string; repoId: string; path: string; branch: string; baseBranch: string; createdAt: string; baseBranchRemote?: boolean; trackRemote?: boolean;
 }
 export interface StoreData {
   version: 1; settings: Settings; repositories: Repository[]; managedWorktrees: ManagedWorktree[];

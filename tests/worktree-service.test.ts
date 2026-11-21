@@ -120,8 +120,7 @@ test('creation checks out the selected local branch without creating a prefixed 
   await git(f.repoPath, 'worktree', 'add', externalPath, 'topic/existing');
   await assert.rejects(f.service.createWorktree(input), { code: 'BRANCH_IN_USE' });
   await git(f.repoPath, 'worktree', 'remove', externalPath);
-  await git(f.repoPath, 'update-ref', 'refs/remotes/origin/remote-only', 'HEAD');
-  await assert.rejects(f.service.previewCreate({ ...input, baseBranch: 'origin/remote-only' }), { code: 'BRANCH_MISSING' });
+  await assert.rejects(f.service.previewCreate({ ...input, baseBranch: 'does-not-exist' }), { code: 'BRANCH_MISSING' });
 
   const created = await f.service.createWorktree(input);
   assert.equal(created.path, preview.path);
@@ -129,6 +128,40 @@ test('creation checks out the selected local branch without creating a prefixed 
   assert.equal(await git(f.repoPath, 'branch', '--show-current'), 'main');
   assert.equal(await git(f.repoPath, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/'), 'main\ntopic/existing');
   await assert.rejects(f.service.previewCreate(input), { code: 'PATH_EXISTS' });
+});
+
+test('creation from a selected remote branch tracks it under the same name without a prefix', async t => {
+  const f = await fixture(t);
+  await git(f.repoPath, 'remote', 'add', 'origin', f.repoPath);
+  const tree = await git(f.repoPath, 'rev-parse', 'HEAD^{tree}');
+  const remoteHead = await git(f.repoPath, 'commit-tree', tree, '-m', 'Remote commit');
+  await git(f.repoPath, 'update-ref', 'refs/remotes/origin/topic/existing', remoteHead);
+  // Use the selected ref even when its display name also exists locally.
+  await git(f.repoPath, 'branch', 'origin/topic/existing');
+  const input = { ...f.input(''), baseBranch: 'origin/topic/existing', baseBranchRemote: true, useSelectedBranch: true };
+  const preview = await f.service.previewCreate(input);
+  assert.equal(preview.branch, 'topic/existing');
+  assert.equal(preview.trackRemote, true);
+
+  await git(f.repoPath, 'branch', 'topic/existing');
+  await assert.rejects(f.service.previewCreate(input), { code: 'REMOTE_BRANCH_LOCAL_EXISTS' });
+  await git(f.repoPath, 'branch', '-D', 'topic/existing');
+
+  const created = await f.service.createWorktree(input);
+  assert.equal(created.path, preview.path);
+  assert.equal(await git(created.path, 'branch', '--show-current'), 'topic/existing');
+  assert.equal(await git(created.path, 'rev-parse', 'HEAD'), remoteHead);
+  assert.equal(await git(created.path, 'rev-parse', '--symbolic-full-name', '@{upstream}'), 'refs/remotes/origin/topic/existing');
+
+  await git(f.repoPath, 'worktree', 'remove', created.path);
+  await git(f.repoPath, 'branch', '-D', 'topic/existing');
+  const restarted = createWorktreeService({ dataDir: f.dataDir });
+  const rebuilt = await restarted.recreateWorktree(created.id);
+  assert.equal(await git(rebuilt.path, 'rev-parse', '--symbolic-full-name', '@{upstream}'), 'refs/remotes/origin/topic/existing');
+
+  const separate = await restarted.createWorktree({ ...input, useSelectedBranch: false, branchName: 'separate' });
+  assert.equal(separate.branch, 'wt/separate');
+  assert.equal(await git(separate.path, 'rev-parse', 'HEAD'), remoteHead);
 });
 
 test('creation refuses both nonempty and empty target directories without overwriting them', async t => {

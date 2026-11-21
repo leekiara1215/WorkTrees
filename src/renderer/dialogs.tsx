@@ -3,10 +3,14 @@ import type { AppError, Branch, CreatePreview, DeleteOutcome, DeletePreview, Rec
 import { appError, ErrorNotice, Icon, Modal, request, Spinner } from './ui';
 import { CheckoutFooter, useCheckout } from './checkout';
 
+function branchOptionValue(branch: Branch) {
+  return `${branch.remote ? 'remote' : 'local'}:${branch.name}`;
+}
+
 export function CreateDialog({ repositories, settings, initialRepoId, onClose, onCreated }: { repositories: Repository[]; settings: Settings; initialRepoId: string; onClose: () => void; onCreated: (worktree: Worktree, recovering: boolean) => void }) {
   const [repoId, setRepoId] = useState(initialRepoId || repositories[0]?.id || '');
   const [branches, setBranches] = useState<Branch[]>([]);
-  const [baseBranch, setBaseBranch] = useState('');
+  const [baseBranchOption, setBaseBranchOption] = useState('');
   const [useSelectedBranch, setUseSelectedBranch] = useState(false);
   const [branchName, setBranchName] = useState('');
   const [branchesLoading, setBranchesLoading] = useState(false);
@@ -21,23 +25,26 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
   const branchNameId = useId();
   const previewRequest = useRef<Promise<CreatePreview> | null>(null);
   const repo = repositories.find(item => item.id === repoId);
-  const canUseSelectedBranch = branches.some(branch => branch.name === baseBranch && !branch.remote && !branch.current);
+  const selectedBranch = branches.find(branch => branchOptionValue(branch) === baseBranchOption);
+  const baseBranch = selectedBranch?.name ?? '';
+  const baseBranchRemote = selectedBranch?.remote;
+  const canUseSelectedBranch = !!selectedBranch && !selectedBranch.current;
   const name = useSelectedBranch ? '' : branchName.trim();
-  const inputKey = JSON.stringify([repoId, baseBranch, name, useSelectedBranch]);
+  const inputKey = JSON.stringify([repoId, baseBranchOption, name, useSelectedBranch]);
   const useExistingBranch = existingBranchKey === inputKey;
   const key = JSON.stringify([inputKey, previewReload, useExistingBranch]);
-  const input = { repoId, baseBranch, branchName: name, useExistingBranch, useSelectedBranch };
+  const input = { repoId, baseBranch, branchName: name, useExistingBranch, useSelectedBranch, baseBranchRemote };
   const effectivePrefix = repo?.branchPrefix ?? settings.branchPrefix;
   const canPreview = !!(repoId && baseBranch && !branchesLoading && (useSelectedBranch ? canUseSelectedBranch : name));
 
   useEffect(() => {
     let active = true;
-    setBranches([]); setBaseBranch(''); setUseSelectedBranch(false); setBranchError(null); setBranchesLoading(true);
+    setBranches([]); setBaseBranchOption(''); setUseSelectedBranch(false); setBranchError(null); setBranchesLoading(true);
     request(() => window.worktrees.listBranches(repoId)).then(data => {
       if (!active) return;
       setBranches(data);
       const preferred = data.find(branch => branch.name === repo?.defaultBranch) ?? data.find(branch => branch.current) ?? data.find(branch => !branch.remote) ?? data[0];
-      setBaseBranch(preferred?.name ?? '');
+      setBaseBranchOption(preferred ? branchOptionValue(preferred) : '');
     }).catch(error => { if (active) setBranchError(appError(error)); }).finally(() => { if (active) setBranchesLoading(false); });
     return () => { active = false; };
   }, [repoId, branchReload, repo?.defaultBranch]);
@@ -48,7 +55,7 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
     const timer = window.setTimeout(async () => {
       await previewRequest.current?.catch(() => undefined);
       if (!active) return;
-      const pending = request(() => window.worktrees.previewCreate({ repoId, baseBranch, branchName: name, useExistingBranch, useSelectedBranch }));
+      const pending = request(() => window.worktrees.previewCreate({ repoId, baseBranch, branchName: name, useExistingBranch, useSelectedBranch, baseBranchRemote }));
       previewRequest.current = pending;
       try {
         const data = await pending;
@@ -60,12 +67,17 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
       }
     }, 500);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [repoId, baseBranch, name, useExistingBranch, useSelectedBranch, key, canPreview]);
+  }, [repoId, baseBranch, name, useExistingBranch, useSelectedBranch, baseBranchRemote, key, canPreview]);
 
   const result = canPreview && preview?.key === key ? preview : null;
   const currentPreview = result && 'data' in result ? result.data : null;
   const error = result && 'error' in result ? result.error : null;
   const previewing = canPreview && !result;
+  function updateCreateMode(useSelected: boolean) {
+    setUseSelectedBranch(useSelected);
+    setPreview(null);
+    setOperationError(null);
+  }
   function updateBranchName(value: string) {
     if (value.trim() !== name) setPreview(null);
     setBranchName(value);
@@ -91,15 +103,29 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
   return <Modal title="创建 Worktree" subtitle="从一个基准分支，开启独立的工作目录。" onClose={onClose} busy={saving}>
     <form onSubmit={event => { event.preventDefault(); void create(); }}>
       <div className="modal-body form-stack">
-        <label className="field">仓库<select value={repoId} onChange={event => { setRepoId(event.target.value); setBaseBranch(''); setBranchesLoading(true); setPreview(null); }} disabled={saving}>{repositories.map(repo => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select></label>
-        <label className="field">基准分支<select value={baseBranch} onChange={event => { setBaseBranch(event.target.value); setUseSelectedBranch(false); setPreview(null); }} disabled={saving || branchesLoading || !branches.length}><option value="" disabled>{branchesLoading ? '正在读取分支…' : '请选择基准分支'}</option>{branches.map(branch => <option value={branch.name} key={`${branch.remote ? 'remote' : 'local'}:${branch.name}`}>{branch.name}{branch.remote ? ' · 远程' : ''}{branch.current ? ' · 当前' : ''}</option>)}</select></label>
+        <label className="field">仓库<select value={repoId} onChange={event => { setRepoId(event.target.value); setBaseBranchOption(''); setBranchesLoading(true); setPreview(null); }} disabled={saving}>{repositories.map(repo => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select></label>
+        <label className="field">基准分支<select value={baseBranchOption} onChange={event => { setBaseBranchOption(event.target.value); setUseSelectedBranch(false); setPreview(null); }} disabled={saving || branchesLoading || !branches.length}><option value="" disabled>{branchesLoading ? '正在读取分支…' : '请选择基准分支'}</option>{branches.map(branch => <option value={branchOptionValue(branch)} key={branchOptionValue(branch)}>{branch.name}{branch.remote ? ' · 远程' : ''}{branch.current ? ' · 当前' : ''}</option>)}</select></label>
         <ErrorNotice error={branchError} onRetry={() => setBranchReload(value => value + 1)} />
         {!branchesLoading && !branchError && branches.length === 0 && <p className="inline-hint">此仓库还没有可用分支。请先在仓库中创建首个提交，再重新读取分支。</p>}
-        {canUseSelectedBranch && <label className="create-branch-option">
-          <input type="checkbox" checked={useSelectedBranch} onChange={event => { setUseSelectedBranch(event.target.checked); setPreview(null); setOperationError(null); }} disabled={saving || branchesLoading} />
-          直接使用所选分支
-        </label>}
-        {!useSelectedBranch && <div className="field"><div className="field-heading"><label htmlFor={branchNameId}>分支名称</label><button type="button" className="auto-name-button" onClick={generateBranchName} disabled={saving || branchesLoading} title="生成不含前缀的日期与随机名称"><Icon name="refresh" size={12} />自动生成</button></div><div className="prefix-input">{effectivePrefix && <span title="当前有效分支前缀">{effectivePrefix}</span>}<input id={branchNameId} aria-describedby={`${branchNameId}-hint`} autoFocus value={branchName} onChange={event => updateBranchName(event.target.value)} placeholder="例如 feature/new-design" disabled={saving} autoComplete="off" spellCheck={false} /></div><span className="field-hint" id={`${branchNameId}-hint`}>可手填或自动生成不含前缀的名称。完整分支与目录由下方预览确认。</span></div>}
+        {baseBranchRemote ? (
+          <fieldset className="create-branch-mode" disabled={saving || branchesLoading}>
+            <legend>创建方式</legend>
+            <label className="create-branch-option">
+              <input type="radio" name="create-branch-mode" checked={useSelectedBranch} onChange={() => updateCreateMode(true)} />
+              使用所选远程分支
+            </label>
+            <label className="create-branch-option">
+              <input type="radio" name="create-branch-mode" checked={!useSelectedBranch} onChange={() => updateCreateMode(false)} />
+              单独创建分支
+            </label>
+          </fieldset>
+        ) : canUseSelectedBranch && (
+          <label className="create-branch-option">
+            <input type="checkbox" checked={useSelectedBranch} onChange={event => updateCreateMode(event.target.checked)} disabled={saving || branchesLoading} />
+            直接使用所选分支
+          </label>
+        )}
+        {!useSelectedBranch && <div className="field"><div className="field-heading"><label htmlFor={branchNameId}>分支名称</label><button type="button" className="auto-name-button" onClick={generateBranchName} disabled={saving || branchesLoading} title="生成不含前缀的日期与随机名称"><Icon name="refresh" size={12} />自动生成</button></div><div className="prefix-input">{effectivePrefix && <span title="当前有效分支前缀">{effectivePrefix}</span>}<input id={branchNameId} aria-describedby={`${branchNameId}-hint`} autoFocus={!baseBranchRemote} value={branchName} onChange={event => updateBranchName(event.target.value)} placeholder="例如 feature/new-design" disabled={saving} autoComplete="off" spellCheck={false} /></div><span className="field-hint" id={`${branchNameId}-hint`}>可手填或自动生成不含前缀的名称。完整分支与目录由下方预览确认。</span></div>}
         <section className="preview-panel create-preview ready" aria-labelledby={`${branchNameId}-preview`}>
           <div className="section-label">
             <Icon name="branch" size={16} /><span id={`${branchNameId}-preview`}>创建预览</span>
@@ -107,8 +133,8 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
           </div>
           <div className="create-preview-content" tabIndex={0} aria-label="分支、路径和校验结果">
             <dl className="preview-values">
-              <div><dt>完整分支</dt><dd>{currentPreview?.branch ?? (useSelectedBranch ? baseBranch : name ? effectivePrefix + name : '—')}</dd></div>
-              {!useSelectedBranch && <div><dt>基准分支</dt><dd>{currentPreview?.baseBranch || baseBranch || '—'}</dd></div>}
+              <div><dt>完整分支</dt><dd>{currentPreview?.branch ?? (useSelectedBranch && !baseBranchRemote ? baseBranch : name ? effectivePrefix + name : '—')}</dd></div>
+              {(!useSelectedBranch || baseBranchRemote) && <div><dt>基准分支</dt><dd>{currentPreview?.baseBranch || baseBranch || '—'}</dd></div>}
               <div><dt>完整路径</dt><dd className="path-value">{currentPreview?.path ?? '—'}</dd></div>
             </dl>
             {!!currentPreview?.warnings.length && <ul className="warning-list">{currentPreview.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>}

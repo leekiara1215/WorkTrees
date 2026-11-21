@@ -12,8 +12,8 @@ export interface Worktree {
   stale: boolean; error: AppError | null;
 }
 export interface Snapshot { settings: Settings; repositories: Repository[]; worktrees: Worktree[]; errors: AppError[]; refreshedAt: string }
-export interface CreateInput { repoId: string; baseBranch: string; branchName: string; useExistingBranch?: boolean; useSelectedBranch?: boolean }
-export interface CreatePreview { repoId: string; branch: string; baseBranch: string; path: string; warnings: string[]; retry?: RecoveryPreview; useExistingBranch?: boolean }
+export interface CreateInput { repoId: string; baseBranch: string; branchName: string; useExistingBranch?: boolean; useSelectedBranch?: boolean; baseBranchRemote?: boolean }
+export interface CreatePreview { repoId: string; branch: string; baseBranch: string; path: string; warnings: string[]; retry?: RecoveryPreview; useExistingBranch?: boolean; trackRemote?: boolean }
 export interface RecoveryPreview { worktreeId: string; path: string; branch: string; baseBranch: string | null; branchExists: boolean; action: 'recreate-existing-branch' | 'recreate-from-base'; warnings: string[] }
 export interface DeletePreview {
   worktreeId: string; path: string; branch: string | null; head: string | null;
