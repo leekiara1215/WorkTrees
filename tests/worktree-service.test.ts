@@ -108,6 +108,29 @@ test('creation uses real Git worktrees, preserves source checkout, and persists 
   assert(restored.worktrees.some(w => w.id === created.id && w.managed && w.baseBranch === 'main'));
 });
 
+test('creation checks out the selected local branch without creating a prefixed branch', async t => {
+  const f = await fixture(t);
+  await git(f.repoPath, 'branch', 'topic/existing');
+  const input = { ...f.input(''), baseBranch: 'topic/existing', useSelectedBranch: true };
+  const preview = await f.service.previewCreate(input);
+  assert.equal(preview.branch, 'topic/existing');
+  assert.equal(preview.useExistingBranch, true);
+  await assert.rejects(f.service.previewCreate({ ...input, baseBranch: 'main' }), { code: 'BRANCH_IN_USE' });
+  const externalPath = path.join(f.root, 'external');
+  await git(f.repoPath, 'worktree', 'add', externalPath, 'topic/existing');
+  await assert.rejects(f.service.createWorktree(input), { code: 'BRANCH_IN_USE' });
+  await git(f.repoPath, 'worktree', 'remove', externalPath);
+  await git(f.repoPath, 'update-ref', 'refs/remotes/origin/remote-only', 'HEAD');
+  await assert.rejects(f.service.previewCreate({ ...input, baseBranch: 'origin/remote-only' }), { code: 'BRANCH_MISSING' });
+
+  const created = await f.service.createWorktree(input);
+  assert.equal(created.path, preview.path);
+  assert.equal(await git(created.path, 'branch', '--show-current'), 'topic/existing');
+  assert.equal(await git(f.repoPath, 'branch', '--show-current'), 'main');
+  assert.equal(await git(f.repoPath, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/'), 'main\ntopic/existing');
+  await assert.rejects(f.service.previewCreate(input), { code: 'PATH_EXISTS' });
+});
+
 test('creation refuses both nonempty and empty target directories without overwriting them', async t => {
   const f = await fixture(t);
   await f.service.updateSettings({ worktreeRoot: '<REPOSITORY_PATH>/../shared/<REPOSITORY_NAME>' });

@@ -114,11 +114,19 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     plain(input);
     const repo = repository(input.repoId);
     await requireRepo(repo);
-    text(input.baseBranch, '基准分支'); text(input.branchName, '分支名', 240);
+    text(input.baseBranch, '基准分支');
     if (input.useExistingBranch !== undefined && typeof input.useExistingBranch !== 'boolean') fail('INVALID_INPUT', '是否使用已有分支必须明确选择。');
-    await validateBranch(repo, input.branchName);
-    const branch = (repo.branchPrefix ?? data.settings.branchPrefix) + input.branchName;
+    if (input.useSelectedBranch !== undefined && typeof input.useSelectedBranch !== 'boolean') fail('INVALID_INPUT', '是否直接使用所选分支必须明确选择。');
+    const useExistingBranch = input.useSelectedBranch || input.useExistingBranch;
+    let branch = input.baseBranch;
+    if (!input.useSelectedBranch) {
+      await validateBranch(repo, input.branchName);
+      branch = (repo.branchPrefix ?? data.settings.branchPrefix) + input.branchName;
+    }
     await validateBranch(repo, branch);
+    const refs = await branches(repo);
+    const branchExists = refs.some(ref => !ref.remote && ref.name === branch);
+    if (input.useSelectedBranch && !branchExists) fail('BRANCH_MISSING', '请选择已有的本地分支。', branch);
     // Git records physical paths. Resolve existing ancestors before saving a future path,
     // including common macOS aliases such as /tmp -> /private/tmp.
     const root = await physicalPath(rootPath(data.settings.worktreeRoot, repo));
@@ -135,15 +143,13 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
       const retry = await recovery(record.id);
       return { repoId: repo.id, branch, baseBranch: record.baseBranch, path, warnings: [...warnings, ...retry.warnings], retry };
     }
-    const refs = await branches(repo);
     if (!refs.some(ref => ref.name === input.baseBranch)) fail('BASE_BRANCH_MISSING', '基准分支不存在，请刷新分支列表。', input.baseBranch);
-    const branchExists = refs.some(ref => !ref.remote && ref.name === branch);
-    if (branchExists && !input.useExistingBranch) fail('BRANCH_EXISTS', '目标分支已存在，可以使用该分支或输入新的分支名。', branch);
-    if (!branchExists && input.useExistingBranch) fail('BRANCH_MISSING', '目标分支已不存在，请重新校验。', branch);
+    if (branchExists && !useExistingBranch) fail('BRANCH_EXISTS', '目标分支已存在，可以使用该分支或输入新的分支名。', branch);
+    if (!branchExists && useExistingBranch) fail('BRANCH_MISSING', '目标分支已不存在，请重新校验。', branch);
     if (await occupied(path)) fail('PATH_EXISTS', '目标目录已存在，请调整根目录或分支名称。', path);
     const registrations = await listGitWorktrees(repo.path);
     if (registrations.some(w => samePath(w.path, path)) || records.length) fail('PATH_REGISTERED', '该路径已有 Worktree 记录，请从异常列表重建或调整名称。', path);
-    if (input.useExistingBranch) {
+    if (useExistingBranch) {
       if (registrations.some(w => w.branch === branch)) fail('BRANCH_IN_USE', '该分支已被其他 Worktree 使用。', branch);
       warnings.push('使用现有分支的当前提交检出到新目录，保留已有提交。');
       return { repoId: repo.id, branch, baseBranch: input.baseBranch, path, warnings, useExistingBranch: true };
@@ -210,7 +216,7 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     recoveryRegistration(record, await listGitWorktrees(repo.path));
     const refs = await branches(repo);
     const branchExists = refs.some(b => !b.remote && b.name === record.branch);
-    if (!branchExists && !refs.some(b => b.name === record.baseBranch)) fail('BASE_BRANCH_MISSING', '原分支和记录的基准分支均不存在，无法重建。', record.baseBranch);
+    if (!branchExists && (record.baseBranch === record.branch || !refs.some(b => b.name === record.baseBranch))) fail('BASE_BRANCH_MISSING', '原分支和记录的基准分支均不存在，无法重建。', record.baseBranch);
     return { worktreeId, path: record.path, branch: record.branch, baseBranch: record.baseBranch, branchExists,
       action: branchExists ? 'recreate-existing-branch' : 'recreate-from-base', warnings: [branchExists ? '使用现有分支重建目录。' : `原分支已不存在，将从 ${record.baseBranch} 重新创建。`, '无法恢复原目录中未提交的修改或未跟踪文件。'] };
   }
@@ -228,7 +234,8 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     const refs = await branches(repo);
     const branchExists = mode !== 'create' && refs.some(b => !b.remote && b.name === record.branch);
     if (mode === 'use-existing' && !branchExists) fail('BRANCH_MISSING', '目标分支已不存在，请重新校验。', record.branch);
-    const base = refs.find(b => !b.remote && b.name === record.baseBranch) ?? refs.find(b => b.remote && b.name === record.baseBranch);
+    const base = record.baseBranch === record.branch && mode === 'recover' ? undefined :
+      refs.find(b => !b.remote && b.name === record.baseBranch) ?? refs.find(b => b.remote && b.name === record.baseBranch);
     const ref = branchExists ? record.branch : base && `${base.remote ? 'refs/remotes/' : 'refs/heads/'}${base.name}`;
     if (!ref) fail('BASE_BRANCH_MISSING', '基准分支不存在，请刷新分支列表。', record.baseBranch);
     const stale = mode === 'recover' && recoveryRegistration(record, await listGitWorktrees(repo.path));
@@ -286,7 +293,7 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     const record = data.managedWorktrees.find(w => w.id === worktreeId);
     const baseBranch = record?.baseBranch ?? repo.defaultBranch;
     let baseHead: string | null = null;
-    if (baseBranch) {
+    if (baseBranch && baseBranch !== entry.branch) {
       const available = await branches(repo);
       const base = available.find(b => !b.remote && b.name === baseBranch) ?? available.find(b => b.remote && b.name === baseBranch);
       if (base) baseHead = (await git(repo.path, ['rev-parse', '--verify', `${base.remote ? 'refs/remotes/' : 'refs/heads/'}${base.name}^{commit}`])).trim();
