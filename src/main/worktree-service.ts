@@ -153,9 +153,15 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     if (inside && !inside.startsWith(`..${sep}`) && inside !== '..' && !isAbsolute(inside)) warnings.push('目标目录位于原仓库内，可能被原仓库视为未跟踪文件。');
     const records = data.managedWorktrees.filter(w => samePath(w.path, path));
     const record = records.length === 1 ? records[0] : undefined;
-    if (record?.repoId === repo.id && record.branch === branch && (!selectedRemote || record.baseBranch === input.baseBranch) && !await occupied(path)) {
-      const retry = await recovery(record.id);
-      return { repoId: repo.id, branch, baseBranch: record.baseBranch, path, warnings: [...warnings, ...retry.warnings], retry };
+    if (record?.repoId === repo.id && record.branch === branch && (!selectedRemote || record.baseBranch === input.baseBranch)) {
+      if (!await occupied(path)) {
+        const retry = await recovery(record.id);
+        return { repoId: repo.id, branch, baseBranch: record.baseBranch, path, warnings: [...warnings, ...retry.warnings], retry };
+      }
+      if (record.pendingSubmoduleHead) {
+        warnings.push('分支已检出，将继续初始化子模块。');
+        return { repoId: repo.id, branch, baseBranch: record.baseBranch, path, warnings, resumeSubmodules: true };
+      }
     }
     if (!base) fail('BASE_BRANCH_MISSING', '基准分支不存在，请刷新分支列表。', input.baseBranch);
     if (branchExists && !useExistingBranch) fail('BRANCH_EXISTS', '目标分支已存在，可以使用该分支或输入新的分支名。', branch);
@@ -168,10 +174,12 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
       warnings.push(selectedRemote
         ? '检出已跟踪所选远程分支的本地分支，保留本地提交。'
         : '使用现有分支的当前提交检出到新目录，保留已有提交。');
+      warnings.push('检出后会递归初始化子模块。');
       return { repoId: repo.id, branch, baseBranch: input.baseBranch, path, warnings, useExistingBranch: true, trackRemote: selectedRemote || undefined };
     }
     if (trackRemote) {
       warnings.push(`创建同名本地分支，并跟踪 ${input.baseBranch}。`);
+      warnings.push('检出后会递归初始化子模块。');
       return { repoId: repo.id, branch, baseBranch: input.baseBranch, path, warnings, trackRemote: true };
     }
     return { repoId: repo.id, branch, baseBranch: input.baseBranch, path, warnings };
@@ -219,7 +227,14 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
       try { await requireRepo(repo); discovered = await listGitWorktrees(repo.path); }
       catch (e) { error = appError(e); errors.push({ ...error, details: `${repo.name}: ${error.details ?? repo.path}` }); }
       const records = data.managedWorktrees.filter(w => w.repoId === repo.id);
-      for (const w of discovered) worktrees.push(await worktree(repo, w, records.find(r => samePath(r.path, w.path)), error, discovered[0]?.path));
+      for (const w of discovered) {
+        const record = records.find(r => samePath(r.path, w.path));
+        const result = await worktree(repo, w, record, error, discovered[0]?.path);
+        if (record?.pendingSubmoduleHead && result.exists) {
+          result.error ??= { code: 'SUBMODULES_PENDING', message: '子模块尚未初始化完成，可在创建窗口中使用同一分支重试。' };
+        }
+        worktrees.push(result);
+      }
       for (const record of records.filter(r => !discovered.some(w => samePath(w.path, r.path)))) worktrees.push(await worktree(repo, undefined, record, error));
       if (error && !worktrees.some(w => w.repoId === repo.id && w.isMain)) worktrees.push(await worktree(repo, { path: repo.path, head: null, branch: null, bare: false, locked: false, lockReason: null, prunable: false }, undefined, error));
     }
@@ -248,6 +263,28 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     if (registrations.some(w => w.branch === record.branch && !samePath(w.path, record.path))) fail('BRANCH_IN_USE', '该分支已被其他 Worktree 使用，无法在原路径重建。', record.branch);
     return entry;
   }
+  async function updateSubmodules(record: ManagedWorktree, signal?: AbortSignal): Promise<void> {
+    try {
+      await checkoutGit(record.path, ['submodule', 'update', '--init', '--recursive', '--checkout'], signal);
+    } catch (error) {
+      if (!(error instanceof ServiceError)) throw error;
+      if (error.code === 'GIT_CANCELLED') throw new ServiceError(error.code, '子模块初始化已取消，可以在此目录重试。', error.details, true);
+      throw new ServiceError('SUBMODULE_UPDATE_FAILED', '分支已检出，但子模块初始化失败。请查看详情后重试。', error.details, true);
+    }
+    const complete = { ...record, pendingSubmoduleHead: undefined };
+    await save({ ...data, managedWorktrees: data.managedWorktrees.map(w => w.id === record.id ? complete : w) });
+  }
+  async function resumeSubmodules(repo: Repository, record: ManagedWorktree, signal?: AbortSignal): Promise<Worktree> {
+    const found = (await listGitWorktrees(repo.path)).find(w => samePath(w.path, record.path));
+    if (!found || found.branch !== record.branch || found.head !== record.pendingSubmoduleHead || found.locked) {
+      fail('WORKTREE_CONFLICT', 'Worktree 的目录、分支或提交状态已变化，无法重试子模块初始化。', record.path);
+    }
+    // Verify the checkout still belongs to this repository before running Git in it.
+    if (!(await inspectDeleteDirectory(repo.path, record.path)).exists) fail('WORKTREE_CONFLICT', 'Worktree 目录已缺失，请重新校验。', record.path);
+    if (await git(record.path, ['diff', '--cached', '--ignore-submodules=none', '--name-only', '-z', '--'])) fail('WORKTREE_CONFLICT', 'Worktree 中存在已暂存的修改，请处理后再重试子模块初始化。', record.path);
+    await updateSubmodules(record, signal);
+    return worktree(repo, found, record);
+  }
   async function checkout(repo: Repository, record: ManagedWorktree, mode: 'create' | 'use-existing' | 'recover', signal?: AbortSignal): Promise<Worktree> {
     checkCheckoutCancellation(signal);
     await mkdir(dirname(record.path), { recursive: true });
@@ -275,7 +312,12 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     await checkoutGit(repo.path, [...args, '--', record.path, ref], signal);
     const found = (await listGitWorktrees(repo.path)).find(w => samePath(w.path, record.path));
     const result = await worktree(repo, found, record);
-    if (found?.branch !== record.branch || !result.exists || result.error) fail('WORKTREE_INCOMPLETE', 'Git 检出后无法确认工作目录已就绪，请刷新列表检查。', result.error?.details ?? record.path);
+    if (found?.branch !== record.branch || !found.head || !result.exists || result.error) fail('WORKTREE_INCOMPLETE', 'Git 检出后无法确认工作目录已就绪，请刷新列表检查。', result.error?.details ?? record.path);
+    if (record.initializeSubmodules || record.pendingSubmoduleHead) {
+      const pending = { ...record, pendingSubmoduleHead: found.head };
+      await save({ ...data, managedWorktrees: data.managedWorktrees.map(w => w.id === record.id ? pending : w) });
+      await updateSubmodules(pending, signal);
+    }
     return result;
   }
   function externalId(repo: Repository, path: string): string {
@@ -413,13 +455,18 @@ export function createWorktreeService({ dataDir }: { dataDir: string }) {
     createWorktree: (input: CreateInput, signal?: AbortSignal) => serial(async (): Promise<Worktree> => {
       checkCheckoutCancellation(signal);
       const plan = await preview(input); const repo = repository(plan.repoId);
+      if (plan.resumeSubmodules) {
+        const record = data.managedWorktrees.find(w => w.repoId === repo.id && w.branch === plan.branch && samePath(w.path, plan.path))!;
+        return resumeSubmodules(repo, record, signal);
+      }
       if (plan.retry) {
         const { worktreeId } = plan.retry;
         const record = data.managedWorktrees.find(w => w.id === worktreeId)!;
         return checkout(repo, record, 'recover', signal);
       }
       const record: ManagedWorktree = { id: randomUUID(), repoId: repo.id, path: plan.path, branch: plan.branch, baseBranch: plan.baseBranch, createdAt: new Date().toISOString(),
-        baseBranchRemote: plan.trackRemote ? true : input.baseBranchRemote, trackRemote: plan.trackRemote };
+        baseBranchRemote: plan.trackRemote ? true : input.baseBranchRemote, trackRemote: plan.trackRemote,
+        initializeSubmodules: plan.useExistingBranch || plan.trackRemote ? true : undefined };
       return checkout(repo, record, plan.useExistingBranch ? 'use-existing' : 'create', signal);
     }),
     previewRecovery: (worktreeId: string) => serial(() => recovery(worktreeId)),

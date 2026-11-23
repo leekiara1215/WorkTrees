@@ -8,6 +8,8 @@ import { ServiceError } from '../git/client.js';
 
 export interface ManagedWorktree {
   id: string; repoId: string; path: string; branch: string; baseBranch: string; createdAt: string; baseBranchRemote?: boolean; trackRemote?: boolean;
+  initializeSubmodules?: true;
+  pendingSubmoduleHead?: string;
 }
 export interface StoreData {
   version: 1; settings: Settings; repositories: Repository[]; managedWorktrees: ManagedWorktree[];
@@ -39,7 +41,9 @@ export function createStore(dataDir: string) {
           || (data.removedRepositories !== undefined && !validRepositories(data.removedRepositories))
           || typeof data.settings.worktreeRoot !== 'string' || typeof data.settings.branchPrefix !== 'string'
           || !Number.isInteger(data.settings.staleDays) || data.settings.staleDays < 1
-          || data.managedWorktrees.some(w => !w || !['id', 'repoId', 'path', 'branch', 'baseBranch', 'createdAt'].every(k => typeof (w as unknown as Record<string, unknown>)[k] === 'string'))) {
+          || data.managedWorktrees.some(w => !w || !['id', 'repoId', 'path', 'branch', 'baseBranch', 'createdAt'].every(k => typeof (w as unknown as Record<string, unknown>)[k] === 'string')
+            || (w.initializeSubmodules !== undefined && w.initializeSubmodules !== true)
+            || (w.pendingSubmoduleHead !== undefined && (typeof w.pendingSubmoduleHead !== 'string' || !/^(?:[\da-f]{40}|[\da-f]{64})$/.test(w.pendingSubmoduleHead))))) {
           throw new Error('Unsupported or invalid data schema');
         }
         if (!isThemeColor(data.settings.themeColor)) data.settings.themeColor = DEFAULT_THEME_COLOR;

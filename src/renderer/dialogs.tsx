@@ -73,6 +73,9 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
   const currentPreview = result && 'data' in result ? result.data : null;
   const error = result && 'error' in result ? result.error : null;
   const previewing = canPreview && !result;
+  const actionLabel = currentPreview?.resumeSubmodules ? '重试初始化子模块'
+    : currentPreview?.retry ? '重试并重建'
+    : currentPreview?.useExistingBranch ? '检出已有分支' : '确认创建';
   function updateCreateMode(useSelected: boolean) {
     setUseSelectedBranch(useSelected);
     setPreview(null);
@@ -140,12 +143,12 @@ export function CreateDialog({ repositories, settings, initialRepoId, onClose, o
             {!!currentPreview?.warnings.length && <ul className="warning-list">{currentPreview.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul>}
             <ErrorNotice error={error} onRetry={error?.code === 'BRANCH_EXISTS' ? undefined : () => setPreviewReload(value => value + 1)} />
             {error?.code === 'BRANCH_EXISTS' && <button type="button" className="button secondary branch-choice" onClick={() => setExistingBranchKey(inputKey)}>使用已有分支</button>}
-            {useExistingBranch && !currentPreview?.retry && <button type="button" className="text-button branch-choice" disabled={saving} onClick={() => setExistingBranchKey(null)}>改为新建分支</button>}
+            {useExistingBranch && !currentPreview?.retry && !currentPreview?.resumeSubmodules && <button type="button" className="text-button branch-choice" disabled={saving} onClick={() => setExistingBranchKey(null)}>改为新建分支</button>}
           </div>
         </section>
         <ErrorNotice error={operationError?.key === inputKey ? operationError.error : null} />
       </div>
-      {saving ? <CheckoutFooter key={checkout.taskId!} label={currentPreview?.retry ? '正在重建' : '正在创建'} checkout={checkout} /> : <div className="modal-footer"><span className="footer-hint"><Icon name="folder" size={15} />独立目录，共享 Git 历史</span><div className="button-row"><button type="button" className="button secondary" onClick={onClose}>取消</button><button type="submit" className="button primary" disabled={previewing || branchesLoading || !currentPreview}><Icon name={currentPreview?.retry ? 'restore' : 'plus'} size={16} />{currentPreview?.retry ? '重试并重建' : currentPreview?.useExistingBranch ? '检出已有分支' : '确认创建'}</button></div></div>}
+      {saving ? <CheckoutFooter key={checkout.taskId!} label={currentPreview?.resumeSubmodules ? '正在初始化子模块' : currentPreview?.retry ? '正在重建' : '正在创建'} checkout={checkout} /> : <div className="modal-footer"><span className="footer-hint"><Icon name="folder" size={15} />独立目录，共享 Git 历史</span><div className="button-row"><button type="button" className="button secondary" onClick={onClose}>取消</button><button type="submit" className="button primary" disabled={previewing || branchesLoading || !currentPreview}><Icon name={currentPreview?.retry || currentPreview?.resumeSubmodules ? 'restore' : 'plus'} size={16} />{actionLabel}</button></div></div>}
     </form>
   </Modal>;
 }

@@ -1,6 +1,6 @@
 {
   "name": "worktrees-lite",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "private": true,
   "description": "A small local Git worktree manager",
   "type": "module",

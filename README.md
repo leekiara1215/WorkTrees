@@ -2,11 +2,11 @@
 
 一个本地 Git Worktree 桌面管理器，支持创建、目录/命名配置、列表/搜索/筛选、异常识别、重建与安全删除。交互参考本机 Kepler，代码独立实现。
 
-当前正式版本为 **v1.2.5**。参见 [发布记录](CHANGELOG.md)。
+当前正式版本为 **v1.2.6**。参见 [发布记录](CHANGELOG.md)。
 
 ## 下载
 
-从 [v1.2.5 发布页](https://github.com/leekiara1215/WorkTrees/releases/tag/v1.2.5) 下载 macOS Apple Silicon（arm64）DMG，打开后把 `WorkTrees Lite.app` 拖入「应用程序」。[v1.0.0 应用压缩包](https://github.com/leekiara1215/WorkTrees/releases/tag/v1.0.0) 仍可下载。使用应用需要本机已安装 Git。
+从 [v1.2.6 发布页](https://github.com/leekiara1215/WorkTrees/releases/tag/v1.2.6) 下载 macOS Apple Silicon（arm64）DMG，打开后把 `WorkTrees Lite.app` 拖入「应用程序」。[v1.0.0 应用压缩包](https://github.com/leekiara1215/WorkTrees/releases/tag/v1.0.0) 仍可下载。使用应用需要本机已安装 Git。
 
 v1.1.1 起的 macOS 内部测试构建使用完整 ad-hoc 签名并校验嵌套代码及资源完整性；没有 Developer ID 身份签名或 Apple 公证，不保证下载后自动通过 Gatekeeper。接收人首次打开时，确认来源可信后可按 [Apple 官方说明](https://support.apple.com/zh-cn/102445)，在“系统设置 → 隐私与安全性”中选择“仍要打开”。旧 v1.1.0 包存在 Electron 残留签名无效的问题，请改发新版内部测试包。Windows、Linux、Intel Mac 暂未验收。
 

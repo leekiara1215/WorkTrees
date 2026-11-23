@@ -164,6 +164,98 @@ test('creation from a selected remote branch tracks it under the same name witho
   assert.equal(await git(separate.path, 'rev-parse', 'HEAD'), remoteHead);
 });
 
+async function fixtureWithNestedSubmodules(t: Parameters<typeof fixture>[0]) {
+  const f = await fixture(t);
+  const allowProtocol = process.env.GIT_ALLOW_PROTOCOL;
+  process.env.GIT_ALLOW_PROTOCOL = 'file';
+  t.after(() => {
+    if (allowProtocol === undefined) delete process.env.GIT_ALLOW_PROTOCOL;
+    else process.env.GIT_ALLOW_PROTOCOL = allowProtocol;
+  });
+  const outer = path.join(f.root, 'outer source');
+  const inner = path.join(f.root, 'inner source');
+  await mkdir(outer);
+  await mkdir(inner);
+  await git(inner, 'init', '-b', 'main');
+  await writeFile(path.join(inner, 'nested.txt'), 'pinned nested content\n');
+  await git(inner, 'add', 'nested.txt');
+  await git(inner, 'commit', '-m', 'Add nested fixture');
+  const innerHead = await git(inner, 'rev-parse', 'HEAD');
+  await git(outer, 'init', '-b', 'main');
+  await git(outer, 'submodule', 'add', inner, 'inner');
+  await git(outer, 'commit', '-m', 'Add nested submodule');
+  const outerHead = await git(outer, 'rev-parse', 'HEAD');
+  await git(f.repoPath, 'switch', '-c', 'wt/with-submodules');
+  await git(f.repoPath, 'submodule', 'add', outer, 'modules/outer');
+  await git(f.repoPath, 'commit', '-m', 'Add submodule to the existing branch');
+  const branchHead = await git(f.repoPath, 'rev-parse', 'HEAD');
+  await git(f.repoPath, 'switch', 'main');
+  const existingInput = { ...f.input('with-submodules'), useExistingBranch: true };
+  return { ...f, existingInput, inner, innerHead, outerHead, branchHead };
+}
+
+test('directly using a selected local branch initializes nested submodules at the recorded commits', async t => {
+  const f = await fixtureWithNestedSubmodules(t);
+  await writeFile(path.join(f.inner, 'nested.txt'), 'newer remote content\n');
+  await git(f.inner, 'commit', '-am', 'Move upstream branch');
+  const input = { ...f.input(''), baseBranch: 'wt/with-submodules', useSelectedBranch: true };
+  const preview = await f.service.previewCreate(input);
+  assert(preview.useExistingBranch);
+  await assert.rejects(access(preview.path));
+
+  const created = await f.service.createWorktree(input);
+
+  assert.equal(created.head, f.branchHead);
+  const outer = path.join(created.path, 'modules/outer');
+  const inner = path.join(outer, 'inner');
+  assert.equal(await git(outer, 'rev-parse', 'HEAD'), f.outerHead);
+  assert.equal(await git(inner, 'rev-parse', 'HEAD'), f.innerHead);
+  assert.equal(await readFile(path.join(inner, 'nested.txt'), 'utf8'), 'pinned nested content\n');
+  assert.equal(await git(created.path, 'status', '--porcelain'), '');
+  assert.equal(await git(f.repoPath, 'branch', '--show-current'), 'main');
+});
+
+test('directly tracking a selected remote branch initializes nested submodules', async t => {
+  const f = await fixtureWithNestedSubmodules(t);
+  await git(f.repoPath, 'remote', 'add', 'origin', f.repoPath);
+  await git(f.repoPath, 'update-ref', 'refs/remotes/origin/with-submodules', f.branchHead);
+  const input = { ...f.input(''), baseBranch: 'origin/with-submodules', baseBranchRemote: true, useSelectedBranch: true };
+
+  const created = await f.service.createWorktree(input);
+
+  assert.equal(created.branch, 'with-submodules');
+  assert.equal(await git(created.path, 'rev-parse', '--symbolic-full-name', '@{upstream}'), 'refs/remotes/origin/with-submodules');
+  assert.equal(await git(path.join(created.path, 'modules/outer/inner'), 'rev-parse', 'HEAD'), f.innerHead);
+});
+
+test('a failed nested submodule download can resume in the same worktree after restart', async t => {
+  const f = await fixtureWithNestedSubmodules(t);
+  const { path: target } = await f.service.previewCreate(f.existingInput);
+  const offline = `${f.inner}.offline`;
+  await rename(f.inner, offline);
+
+  await assert.rejects(f.service.createWorktree(f.existingInput), { code: 'SUBMODULE_UPDATE_FAILED', retryable: true });
+  const restarted = createWorktreeService({ dataDir: f.dataDir });
+  const pending = (await restarted.getSnapshot()).worktrees.find(w => w.path === target);
+  assert.equal(pending?.error?.code, 'SUBMODULES_PENDING');
+  assert.equal(await git(path.join(target, 'modules/outer'), 'rev-parse', 'HEAD'), f.outerHead);
+  const retry = f.input('with-submodules');
+  assert((await restarted.previewCreate(retry)).resumeSubmodules);
+  await rename(offline, f.inner);
+
+  await writeFile(path.join(target, 'user-file'), 'local data\n');
+  await git(target, 'add', 'user-file');
+  await assert.rejects(restarted.createWorktree(retry), { code: 'WORKTREE_CONFLICT' });
+  await git(target, 'restore', '--staged', '--', 'user-file');
+  const resumed = await restarted.createWorktree(retry);
+
+  assert.equal(resumed.id, pending?.id);
+  assert.equal(resumed.head, f.branchHead);
+  assert.equal(await git(path.join(target, 'modules/outer/inner'), 'rev-parse', 'HEAD'), f.innerHead);
+  assert.equal(await readFile(path.join(target, 'user-file'), 'utf8'), 'local data\n');
+  assert.equal((await restarted.getSnapshot()).worktrees.find(w => w.id === resumed.id)?.error, null);
+});
+
 test('creation refuses both nonempty and empty target directories without overwriting them', async t => {
   const f = await fixture(t);
   await f.service.updateSettings({ worktreeRoot: '<REPOSITORY_PATH>/../shared/<REPOSITORY_NAME>' });
